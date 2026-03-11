@@ -1,4 +1,104 @@
+# UE Plugin build artifacts
 Binaries/
 Intermediate/
 logs/
 .claude/
+
+# Unreal MCP
+unreal_mcp_advanced.log
+
+# Python-generated files
+__pycache__/
+__pycache__.meta
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+venv/
+ENV/
+.env
+env/
+env.bak/
+venv.bak/
+
+# Unreal Engine generated files (project level)
+FlopperamUnrealMCP/Binaries/
+FlopperamUnrealMCP/Build/
+FlopperamUnrealMCP/DerivedDataCache/
+FlopperamUnrealMCP/Intermediate/
+FlopperamUnrealMCP/Saved/
+FlopperamUnrealMCP/.vs/
+FlopperamUnrealMCP/.vsconfig
+
+# Content folder exclusions
+FlopperamUnrealMCP/Content/StarterContent/
+FlopperamUnrealMCP/Content/Developers/
+FlopperamUnrealMCP/Content/Collections/
+
+# Unreal Engine generated files (plugin level)
+FlopperamUnrealMCP/Plugins/UnrealMCP/Binaries/
+FlopperamUnrealMCP/Plugins/UnrealMCP/Intermediate/
+FlopperamUnrealMCP/FlopperamUnrealMCP.sln
+
+# Unreal Engine temporary and cache files
+*.tmp
+*.VC.db
+*.opensdf
+*.opendb
+*.sdf
+*.cachefile
+*.VC.VC.opendb
+*.uasset
+
+# Unreal Engine user-specific files
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Build results
+[Dd]ebug/
+[Dd]ebugPublic/
+[Rr]elease/
+[Rr]eleases/
+x64/
+x86/
+bld/
+[Bb]in/
+[Oo]bj/
+
+# Compiled Python files
+*.py[cod]
+*$py.class
+*.so
+.Python
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+.installed.cfg
+*.egg
+
+# Project specific files
+MCPGameProject/Config/DefaultEditorPerProjectUserSettings.ini
+
+# Cursor
+.cursor/mcp.json
+
+# Visual Studio
+.vs
+.vscode
+*.code-workspace
+.ignore
+
+# Clang
+.clang-format
+.clangd
