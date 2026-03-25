@@ -13,7 +13,7 @@ import struct
 import time
 import threading
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Dict, Any, Optional, List
+from typing import AsyncIterator, Dict, Any, Optional, List, Union
 from mcp.server.fastmcp import FastMCP
 
 from helpers.infrastructure_creation import (
@@ -42,6 +42,7 @@ from helpers.actor_name_manager import (
 from helpers.bridge_aqueduct_creation import (
     build_suspension_bridge_structure, build_aqueduct_structure
 )
+from helpers.medieval_town_creation import create_kenshi_settlement as _create_kenshi_settlement
 
 # ============================================================================
 # Blueprint Node Graph Tools
@@ -94,12 +95,21 @@ class UnrealConnection:
     # Commands that need longer timeouts
     LARGE_OPERATION_COMMANDS = {
         "get_available_materials",
+        "get_material_instance_parameters",
+        "set_material_instance_parameters",
         "create_town",
-        "create_castle_fortress", 
+        "create_castle_fortress",
         "construct_mansion",
         "create_suspension_bridge",
         "create_aqueduct",
-        "create_maze"
+        "create_maze",
+        "create_kenshi_settlement",
+        "generate_thumbnails",
+        "scan_assets_for_thumbnails",
+        "get_material_expressions",
+        "get_material_connections",
+        "get_material_function_info",
+        "get_material_stats"
     }
     
     def __init__(self):
@@ -1454,6 +1464,88 @@ def get_actor_material_info(
         return {"success": False, "message": str(e)}
 
 @mcp.tool()
+def get_material_instance_parameters(
+    material_path: str,
+    parameter_types: list = None,
+    overridden_only: bool = False,
+    name_filter: str = None,
+    include_metadata: bool = True
+) -> Dict[str, Any]:
+    """Get parameter values from a Material Instance (scalars, vectors, textures, static switches, etc.).
+
+    Returns parameter names, values, groups, and whether each is overridden vs inherited from parent.
+    Works with Material Instance Constants. If a base Material path is given, returns a note instead.
+
+    Filters (all optional):
+    - parameter_types: list of types to include: "scalar", "vector", "texture", "static_switch",
+      "static_component_mask", "runtime_virtual_texture". Default: all types.
+    - overridden_only: if true, only return parameters that are overridden in this instance (not inherited defaults).
+    - name_filter: case-insensitive substring match on parameter name (e.g. "Roughness", "Snow").
+    - include_metadata: if true (default), include group_name, description, and min/max for scalars.
+
+    For large material instances (e.g. landscape), use parameter_types and/or name_filter to reduce output size.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    try:
+        params = {"material_path": material_path}
+        if parameter_types is not None:
+            params["parameter_types"] = parameter_types
+        if overridden_only:
+            params["overridden_only"] = True
+        if name_filter is not None:
+            params["name_filter"] = name_filter
+        if not include_metadata:
+            params["include_metadata"] = False
+        response = unreal.send_command("get_material_instance_parameters", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"get_material_instance_parameters error: {e}")
+        return {"success": False, "message": str(e)}
+
+@mcp.tool()
+def set_material_instance_parameters(
+    material_path: str,
+    scalar_parameters: list = None,
+    vector_parameters: list = None,
+    texture_parameters: list = None,
+    static_switch_parameters: list = None
+) -> Dict[str, Any]:
+    """Set parameter values on a Material Instance Constant (scalars, vectors, textures, static switches).
+
+    Each parameter type takes a list of objects:
+    - scalar_parameters: [{"name": "Roughness", "value": 0.5}, ...]
+    - vector_parameters: [{"name": "BaseColor", "value": [1.0, 0.5, 0.2, 1.0]}, ...]
+    - texture_parameters: [{"name": "Diffuse", "value": "/Game/Textures/T_Diff"}, ...] (use "" or "None" to clear)
+    - static_switch_parameters: [{"name": "UseNormalMap", "value": true}, ...]
+
+    Per-parameter errors are collected in the 'errors' array without stopping other parameters from being set.
+    Changes are marked dirty in the editor (requires manual save).
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    try:
+        params = {"material_path": material_path}
+        if scalar_parameters is not None:
+            params["scalar_parameters"] = scalar_parameters
+        if vector_parameters is not None:
+            params["vector_parameters"] = vector_parameters
+        if texture_parameters is not None:
+            params["texture_parameters"] = texture_parameters
+        if static_switch_parameters is not None:
+            params["static_switch_parameters"] = static_switch_parameters
+
+        response = unreal.send_command("set_material_instance_parameters", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"set_material_instance_parameters error: {e}")
+        return {"success": False, "message": str(e)}
+
+@mcp.tool()
 def set_mesh_material_color(
     blueprint_name: str,
     component_name: str,
@@ -2785,12 +2877,1580 @@ def rename_function(
         return {"success": False, "message": str(e)}
 
 
-# Run the server
+# ============================================================================
+# Kenshi-Style Medieval Settlement Generator
+# ============================================================================
+
+@mcp.tool()
+def create_kenshi_settlement(
+    settlement_type: str = "town",
+    faction_style: str = "neutral",
+    location: List[float] = [0.0, 0.0, 0.0],
+    name_prefix: str = "Settlement",
+    irregularity: float = 0.3,
+    seed: int = 0,
+    export_json: bool = True,
+) -> Dict[str, Any]:
+    """
+    Create a Kenshi-style medieval settlement with organic layout.
+
+    Generates an organic medieval town with irregular walls, gates, roads,
+    district-zoned buildings, guard posts, and patrol routes. Previews as
+    colored primitive actors in the viewport and exports JSON for PRK
+    DataAsset import.
+
+    Settlement types:
+    - outpost: Small palisade, 3-5 buildings, 1 gate
+    - village: Wood walls, 8-15 buildings, 1-2 gates
+    - town: Stone walls, 20-35 buildings, 2-3 gates, districts
+    - city: Large stone walls, 40-60 buildings, 3-4 gates, many districts
+    - fortress: Thick walls, 15-25 buildings, military focus
+
+    Args:
+        settlement_type: outpost, village, town, city, fortress
+        faction_style: neutral, holy_nation, shek, tech (affects future layout styles)
+        location: [x, y, z] world position for settlement center
+        name_prefix: Prefix for all spawned actors
+        irregularity: 0.0=regular polygon walls, 1.0=very irregular organic walls
+        seed: Random seed for reproducible layouts (0=random)
+        export_json: If True, export layout JSON to Saved/SettlementLayouts/
+    """
+    try:
+        unreal = get_unreal_connection()
+        if not unreal:
+            return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+        logger.info(f"Creating {settlement_type} settlement at {location} (seed={seed})")
+
+        result = _create_kenshi_settlement(
+            unreal=unreal,
+            settlement_type=settlement_type,
+            faction_style=faction_style,
+            location=location,
+            name_prefix=name_prefix,
+            irregularity=irregularity,
+            seed=seed,
+            export_json=export_json,
+        )
+
+        return result
+
+    except Exception as e:
+        logger.error(f"create_kenshi_settlement error: {e}")
+        return {"success": False, "message": str(e)}
 
 
+# ============================================================================
+# Thumbnail Generation Tools
+# ============================================================================
+
+@mcp.tool()
+def generate_thumbnail(
+    asset_path: str,
+    resolution: int = 256,
+    transparent: bool = True,
+    camera_fov: float = 30.0,
+    camera_pitch: float = -15.0,
+    camera_yaw: float = 90.0,
+    save_directory: str = "/Game/PRK/UI/Icons",
+    ambient_light_only: bool = False,
+    export_png: bool = False,
+    export_disk_path: str = ""
+) -> Dict[str, Any]:
+    """
+    Generate a UI icon thumbnail for a single asset.
+
+    Renders the asset's mesh using an offscreen SceneCaptureComponent2D and
+    saves it as a UTexture2D.
+
+    Supports:
+    - UStaticMesh / USkeletalMesh paths (rendered directly)
+    - UPRKWeaponData / UPRKArmorData paths (extracts EquipStaticMesh/EquipSkeletalMesh)
+    - UPRKItemData paths (uses WorldMesh)
+
+    Args:
+        asset_path: Package path (e.g. "/Game/PRK/Items/Meshes/Barbarian/Male/Helm/SK_helm")
+        resolution: Output texture size in pixels (default 256, max 2048)
+        transparent: If true, render with transparent background (alpha channel)
+        camera_fov: Camera field of view in degrees (default 30)
+        camera_pitch: Camera pitch angle (default -15, negative = looking down)
+        camera_yaw: Camera yaw angle (default 90, front view for Y-facing meshes)
+        save_directory: Package path for output (default "/Game/PRK/UI/Icons")
+        ambient_light_only: If true, skip three-point directional lights and use scene ambient only
+        export_png: If true, also save a PNG file to disk at export_disk_path
+        export_disk_path: Disk folder for PNG export (e.g. "E:/Output/Icons/")
+
+    Returns:
+        Dict with saved_path of the generated texture (and export_png_path if exported)
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    try:
+        params = {
+            "asset_path": asset_path,
+            "resolution": resolution,
+            "transparent": transparent,
+            "camera_fov": camera_fov,
+            "camera_pitch": camera_pitch,
+            "camera_yaw": camera_yaw,
+            "save_directory": save_directory,
+            "ambient_light_only": ambient_light_only,
+            "export_png": export_png,
+            "export_disk_path": export_disk_path
+        }
+        response = unreal.send_command("generate_thumbnail", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"generate_thumbnail error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def generate_thumbnails(
+    asset_paths: Optional[List[str]] = None,
+    directories: Optional[List[str]] = None,
+    resolution: int = 256,
+    transparent: bool = True,
+    camera_fov: float = 30.0,
+    camera_pitch: float = -15.0,
+    camera_yaw: float = 90.0,
+    save_directory: str = "/Game/PRK/UI/Icons",
+    ambient_light_only: bool = False,
+    export_png: bool = False,
+    export_disk_path: str = ""
+) -> Dict[str, Any]:
+    """
+    Batch generate UI icon thumbnails for multiple assets or entire directories.
+
+    Accepts explicit asset paths AND/OR directories to scan recursively.
+    Directories are scanned for UStaticMesh and USkeletalMesh assets.
+
+    Args:
+        asset_paths: List of individual asset package paths
+        directories: List of directory package paths to scan recursively
+        resolution: Output texture size in pixels (default 256, max 2048)
+        transparent: If true, render with transparent background
+        camera_fov: Camera field of view in degrees
+        camera_pitch: Camera pitch angle
+        camera_yaw: Camera yaw angle
+        save_directory: Package path for output
+        ambient_light_only: If true, skip three-point directional lights and use scene ambient only
+        export_png: If true, also save PNG files to disk at export_disk_path
+        export_disk_path: Disk folder for PNG export (e.g. "E:/Output/Icons/")
+
+    Returns:
+        Dict with total/succeeded/failed counts and per-asset results
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    try:
+        params = {
+            "resolution": resolution,
+            "transparent": transparent,
+            "camera_fov": camera_fov,
+            "camera_pitch": camera_pitch,
+            "camera_yaw": camera_yaw,
+            "save_directory": save_directory,
+            "ambient_light_only": ambient_light_only,
+            "export_png": export_png,
+            "export_disk_path": export_disk_path
+        }
+        if asset_paths:
+            params["asset_paths"] = asset_paths
+        if directories:
+            params["directories"] = directories
+
+        response = unreal.send_command("generate_thumbnails", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"generate_thumbnails error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def scan_assets_for_thumbnails(
+    directories: List[str],
+    include_static: bool = True,
+    include_skeletal: bool = True
+) -> Dict[str, Any]:
+    """
+    Scan directories for mesh assets that can have thumbnails generated.
+
+    Dry-run tool: returns the list of found mesh paths without generating anything.
+    Use this to preview what generate_thumbnails would process.
+
+    Args:
+        directories: List of directory package paths to scan (e.g. ["/Game/PRK/Items/Meshes/"])
+        include_static: Include UStaticMesh assets (default true)
+        include_skeletal: Include USkeletalMesh assets (default true)
+
+    Returns:
+        Dict with count and list of found asset_paths
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    try:
+        params = {
+            "directories": directories,
+            "include_static": include_static,
+            "include_skeletal": include_skeletal
+        }
+        response = unreal.send_command("scan_assets_for_thumbnails", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"scan_assets_for_thumbnails error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+# ============================================================================
+# Material Analysis Tools
+# ============================================================================
+
+@mcp.tool()
+def analyze_material(
+    material_path: str
+) -> Dict[str, Any]:
+    """
+    Analyze a base UMaterial's expression graph — returns all nodes, their connections, and properties.
+
+    Use this to understand how a material is constructed: what nodes it uses, how they're
+    connected, parameter names/defaults, texture references, function calls, and custom HLSL code.
+
+    Args:
+        material_path: Package path to the material (e.g. "/Game/Materials/M_MyMaterial")
+
+    Returns:
+        Dict with expressions array containing type, inputs, outputs, and specialized properties for each node
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    try:
+        response = unreal.send_command("get_material_expressions", {"material_path": material_path})
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"analyze_material error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def get_material_output_connections(
+    material_path: str
+) -> Dict[str, Any]:
+    """
+    Get what feeds each material output pin (BaseColor, Normal, Roughness, etc.).
+
+    Quick overview of a material's output wiring without needing the full expression graph.
+    Shows which expression node is connected to each material property.
+
+    Args:
+        material_path: Package path to the material (e.g. "/Game/Materials/M_MyMaterial")
+
+    Returns:
+        Dict with connections array (all outputs) and connected_outputs (only wired ones)
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    try:
+        response = unreal.send_command("get_material_connections", {"material_path": material_path})
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"get_material_output_connections error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def analyze_material_function(
+    function_path: str
+) -> Dict[str, Any]:
+    """
+    Analyze a UMaterialFunction — returns inputs, outputs, description, and internal expression graph.
+
+    Use this to understand reusable material function nodes: what they accept as input,
+    what they output, and how the internal graph transforms the data.
+
+    Args:
+        function_path: Package path to the material function (e.g. "/Engine/Functions/Engine_MaterialFunctions02/Texturing/FlattenNormal")
+
+    Returns:
+        Dict with function metadata, inputs, outputs, and internal expressions
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    try:
+        response = unreal.send_command("get_material_function_info", {"function_path": function_path})
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"analyze_material_function error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def get_material_stats(
+    material_path: str
+) -> Dict[str, Any]:
+    """
+    Get material properties and statistics — domain, blend mode, shading model, expression counts, parameter counts.
+
+    Quick summary of a material's configuration without the full expression graph.
+    Useful for understanding material type and complexity at a glance.
+
+    Args:
+        material_path: Package path to the material (e.g. "/Game/Materials/M_MyMaterial")
+
+    Returns:
+        Dict with domain, blend_mode, shading_models, two_sided, expression_count, parameter_counts, etc.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    try:
+        response = unreal.send_command("get_material_stats", {"material_path": material_path})
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"get_material_stats error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+# ============================================================================
+# Level Analysis Tools
+# ============================================================================
+
+@mcp.tool()
+def get_rvt_volumes() -> Dict[str, Any]:
+    """
+    Get all RuntimeVirtualTextureVolume actors in the current editor level.
+
+    Returns each volume's name, transform, bounds, component settings (hide primitives,
+    snap to landscape, bounds align actor, expand bounds, stream low mips), and the
+    assigned RVT asset info (material type, tile count, tile size, size, layer count,
+    compression, adaptive, continuous update).
+
+    Returns:
+        Dict with count and volumes array containing full RVT volume details
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    try:
+        response = unreal.send_command("get_rvt_volumes", {})
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"get_rvt_volumes error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def get_landscape_info() -> Dict[str, Any]:
+    """
+    Get all Landscape and LandscapeProxy actors in the current editor level.
+
+    Returns each landscape's name, class, transform, bounds, grid dimensions
+    (component size quads, subsection size quads, num subsections, component count),
+    LOD settings, Nanite state, material paths, virtual texture settings
+    (assigned RVTs with material type/size/layers, VT LODs, quad rendering,
+    main pass type), physical material, bounds extensions, and streaming multiplier.
+
+    Returns:
+        Dict with count and landscapes array containing full landscape details
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    try:
+        response = unreal.send_command("get_landscape_info", {})
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"get_landscape_info error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+# ============================================================================
+# Runtime Virtual Texture Tools
+# ============================================================================
+
+@mcp.tool()
+def get_rvt_info(
+    asset_path: str
+) -> Dict[str, Any]:
+    """
+    Get all properties of a RuntimeVirtualTexture asset.
+
+    Returns tile counts (raw setting + computed actual), tile size, border size,
+    material type, compression settings, page table flags, custom material data,
+    LOD group, layer count, computed total size, and priority.
+
+    Args:
+        asset_path: Package path to the RVT asset (e.g. "/Game/VirtualTextures/RVT_Roads")
+
+    Returns:
+        Dict with all RVT configuration fields and computed values
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    try:
+        response = unreal.send_command("get_rvt_info", {"asset_path": asset_path})
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"get_rvt_info error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def set_rvt_properties(
+    asset_path: str,
+    tile_count: Optional[int] = None,
+    tile_size: Optional[int] = None,
+    tile_border_size: Optional[int] = None,
+    material_type: Optional[str] = None,
+    compress_textures: Optional[bool] = None,
+    use_low_quality_compression: Optional[bool] = None,
+    clear_textures: Optional[bool] = None,
+    single_physical_space: Optional[bool] = None,
+    private_space: Optional[bool] = None,
+    adaptive: Optional[bool] = None,
+    continuous_update: Optional[bool] = None,
+    remove_low_mips: Optional[int] = None,
+    custom_material_data: Optional[List[float]] = None,
+    lod_group: Optional[str] = None,
+    custom_priority: Optional[str] = None,
+    use_custom_priority: Optional[bool] = None
+) -> Dict[str, Any]:
+    """
+    Modify properties on a RuntimeVirtualTexture asset.
+
+    Only provided (non-None) fields are changed. After setting, triggers
+    PostEditChangeProperty and marks the package dirty for save.
+
+    Args:
+        asset_path: Package path to the RVT asset
+        tile_count: Tile count exponent (0-12, actual = 2^value)
+        tile_size: Tile size exponent (0-4, actual = 2^(value+6))
+        tile_border_size: Border size (0-4, actual = 2*value)
+        material_type: One of: BaseColor, Mask4, BaseColor_Normal_Roughness,
+                       BaseColor_Normal_Specular, BaseColor_Normal_Specular_YCoCg,
+                       BaseColor_Normal_Specular_Mask_YCoCg, WorldHeight, Displacement
+        compress_textures: Enable GPU compression
+        use_low_quality_compression: Use low quality compression (RGB565)
+        clear_textures: Clear before rendering
+        single_physical_space: Enable packed page table
+        private_space: Enable private page table
+        adaptive: Enable sparse adaptive page tables
+        continuous_update: Enable continuous page updates
+        remove_low_mips: Number of low mips to remove (0-5)
+        custom_material_data: Float4 custom data as [x, y, z, w]
+        lod_group: Texture group name (e.g. "TEXTUREGROUP_World")
+        custom_priority: Priority string: Lowest/Lower/Low/BelowNormal/Normal/AboveNormal/High/Highest
+        use_custom_priority: Whether to use custom priority
+
+    Returns:
+        Dict with fields_set list and any errors
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    # Build properties dict from non-None args
+    properties = {}
+    if tile_count is not None:
+        properties["tile_count"] = tile_count
+    if tile_size is not None:
+        properties["tile_size"] = tile_size
+    if tile_border_size is not None:
+        properties["tile_border_size"] = tile_border_size
+    if material_type is not None:
+        properties["material_type"] = material_type
+    if compress_textures is not None:
+        properties["compress_textures"] = compress_textures
+    if use_low_quality_compression is not None:
+        properties["use_low_quality_compression"] = use_low_quality_compression
+    if clear_textures is not None:
+        properties["clear_textures"] = clear_textures
+    if single_physical_space is not None:
+        properties["single_physical_space"] = single_physical_space
+    if private_space is not None:
+        properties["private_space"] = private_space
+    if adaptive is not None:
+        properties["adaptive"] = adaptive
+    if continuous_update is not None:
+        properties["continuous_update"] = continuous_update
+    if remove_low_mips is not None:
+        properties["remove_low_mips"] = remove_low_mips
+    if custom_material_data is not None:
+        properties["custom_material_data"] = custom_material_data
+    if lod_group is not None:
+        properties["lod_group"] = lod_group
+    if custom_priority is not None:
+        properties["custom_priority"] = custom_priority
+    if use_custom_priority is not None:
+        properties["use_custom_priority"] = use_custom_priority
+
+    if not properties:
+        return {"success": False, "message": "No properties specified to set"}
+
+    try:
+        response = unreal.send_command("set_rvt_properties", {
+            "asset_path": asset_path,
+            "properties": properties
+        })
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"set_rvt_properties error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def read_data_asset(asset_path: str) -> Dict[str, Any]:
+    """Read a DataAsset (or any UObject asset) and return all UPROPERTY fields serialized to JSON.
+
+    Args:
+        asset_path: Full asset path, e.g. "/Game/Data/Weapons/DA_Katana" or "/Game/Data/Weapons/DA_Katana.DA_Katana"
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("read_data_asset", {"asset_path": asset_path})
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"read_data_asset error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def update_data_asset(asset_path: str, properties: Dict[str, Any], save: bool = False) -> Dict[str, Any]:
+    """Update properties on a DataAsset (or any UObject asset). Only specified properties are modified.
+
+    Args:
+        asset_path: Full asset path, e.g. "/Game/Data/Weapons/DA_Katana"
+        properties: Dict of property_name -> new_value. Supports nested structs, arrays, maps, enums, gameplay tags, etc.
+        save: If True, save the asset to disk after updating. Default: mark dirty only.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {"asset_path": asset_path, "properties": properties}
+        if save:
+            params["save"] = True
+        response = unreal.send_command("update_data_asset", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"update_data_asset error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def create_data_asset(asset_path: str, class_name: str, properties: Dict[str, Any] = None, save: bool = False) -> Dict[str, Any]:
+    """Create a new DataAsset (or any UObject asset) at the given path.
+
+    Args:
+        asset_path: Full asset path for the new asset, e.g. "/Game/Data/Weapons/DA_NewSword"
+        class_name: Class to instantiate. Short name (e.g. "PRKWeaponData") or full path ("/Script/PRK.PRKWeaponData").
+        properties: Optional dict of property_name -> value to set on the new asset. Same format as update_data_asset.
+        save: If True, save the asset to disk after creation. Default: mark dirty only.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {"asset_path": asset_path, "class_name": class_name}
+        if properties is not None:
+            params["properties"] = properties
+        if save:
+            params["save"] = True
+        response = unreal.send_command("create_data_asset", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"create_data_asset error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def populate_athena_preset(
+    asset_path: str,
+    tasks: List[Dict[str, Any]],
+    fallback_task: Dict[str, Any] = None,
+    save: bool = False,
+    generate_curves: bool = True
+) -> Dict[str, Any]:
+    """Populate an AthenaAI Agent Preset's Tasks array with inline task instances.
+
+    Each task dict must have a '_class' field with the task class name
+    (e.g. 'UPRKAthenaTask_HealSelf' or '/Script/PRK.UPRKAthenaTask_HealSelf').
+    Constructor-set properties (TaskTag, Considerations) are auto-populated by
+    the C++ constructor. Only pass property overrides you want to change from defaults.
+
+    This command also:
+    - Rebuilds ConsiderationTags from all tasks
+    - Regenerates consideration curve table rows (if generate_curves=True)
+
+    Args:
+        asset_path: Full asset path to the preset, e.g. "/Game/PRK/AI/AthenaAI/AthenaPresets/AthenaAI_CivilianPreset"
+        tasks: List of task definitions. Each is a dict with '_class' and optional property overrides
+               (e.g. {"_class": "UPRKAthenaTask_HealSelf", "Priority": 60}).
+        fallback_task: Optional single task definition for the FallbackTask property.
+        save: If True, save preset and curve table to disk after populating.
+        generate_curves: If True (default), regenerate consideration curves after populating tasks.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {"asset_path": asset_path, "tasks": tasks}
+        if fallback_task is not None:
+            params["fallback_task"] = fallback_task
+        if save:
+            params["save"] = True
+        if not generate_curves:
+            params["generate_curves"] = False
+        response = unreal.send_command("populate_athena_preset", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"populate_athena_preset error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def list_data_assets(directory: str = "/Game/", limit: int = 100, class_filter: str = None) -> Dict[str, Any]:
+    """List DataAssets in a directory, optionally filtered by class.
+
+    Args:
+        directory: Content directory to search, e.g. "/Game/" or "/Game/Data/Weapons/"
+        limit: Maximum number of results to return (default 100)
+        class_filter: Optional class name or full path to filter by, e.g. "PRKWeaponData" or "/Script/PRK.PRKWeaponData"
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {"directory": directory, "limit": limit}
+        if class_filter is not None:
+            params["class_filter"] = class_filter
+        response = unreal.send_command("list_data_assets", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"list_data_assets error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def read_data_table(asset_path: str, limit: int = 200) -> Dict[str, Any]:
+    """Read a DataTable and return its schema (field names + types) and all rows serialized to JSON.
+
+    Args:
+        asset_path: Full asset path to the DataTable, e.g. "/Game/Data/DT_ItemDatabase"
+        limit: Maximum number of rows to return (default 200)
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("read_data_table", {"asset_path": asset_path, "limit": limit})
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"read_data_table error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def read_data_table_row(asset_path: str, row_name: str) -> Dict[str, Any]:
+    """Read a single row from a DataTable by row name.
+
+    Args:
+        asset_path: Full asset path to the DataTable, e.g. "/Game/Data/DT_ItemDatabase"
+        row_name: The row name (key) to look up
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("read_data_table_row", {"asset_path": asset_path, "row_name": row_name})
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"read_data_table_row error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def create_curve_table(asset_path: str, curve_mode: str = "RichCurves", rows: Dict[str, Any] = None, save: bool = False) -> Dict[str, Any]:
+    """Create a new CurveTable asset.
+
+    Args:
+        asset_path: Full asset path for the new CurveTable, e.g. "/Game/Data/CT_DamageScaling"
+        curve_mode: "RichCurves" (default) or "SimpleCurves".
+        rows: Optional initial rows. Dict of row_name -> {keys: [{time, value, ...}], default_value: float}.
+              For RichCurves, each key supports: time, value, interp_mode, tangent_mode, arrive_tangent, leave_tangent.
+              For SimpleCurves, each key supports: time, value. The row can also set 'interp_mode'.
+        save: If True, save the asset to disk after creation. Default: mark dirty only.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {"asset_path": asset_path, "curve_mode": curve_mode}
+        if rows is not None:
+            params["rows"] = rows
+        if save:
+            params["save"] = True
+        response = unreal.send_command("create_curve_table", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"create_curve_table error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def read_curve_table(asset_path: str, row_names: List[str] = None) -> Dict[str, Any]:
+    """Read a CurveTable and return all curve rows with their keys.
+
+    Args:
+        asset_path: Full asset path to the CurveTable, e.g. "/Game/Data/CT_DamageScaling"
+        row_names: Optional list of specific row names to read. If omitted, reads all rows.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {"asset_path": asset_path}
+        if row_names is not None:
+            params["row_names"] = row_names
+        response = unreal.send_command("read_curve_table", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"read_curve_table error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def update_curve_table(asset_path: str, rows: Dict[str, Any] = None, remove_rows: List[str] = None, save: bool = False) -> Dict[str, Any]:
+    """Update a CurveTable: add/modify curve rows or remove rows.
+
+    Each row in 'rows' is a dict with optional 'keys' array and 'default_value'.
+    For RichCurves, each key supports: time, value, interp_mode (Linear/Constant/Cubic/None),
+    tangent_mode (Auto/User/Break/SmartAuto/None), arrive_tangent, leave_tangent.
+    For SimpleCurves, each key supports: time, value. The row can also set 'interp_mode' (Linear/Constant).
+
+    Args:
+        asset_path: Full asset path to the CurveTable, e.g. "/Game/Data/CT_DamageScaling"
+        rows: Dict of row_name -> {keys: [{time, value, ...}], default_value: float}. Missing rows are created.
+        remove_rows: List of row names to remove from the table.
+        save: If True, save the asset to disk after updating. Default: mark dirty only.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {"asset_path": asset_path}
+        if rows is not None:
+            params["rows"] = rows
+        if remove_rows is not None:
+            params["remove_rows"] = remove_rows
+        if save:
+            params["save"] = True
+        response = unreal.send_command("update_curve_table", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"update_curve_table error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+# ============================================================
+# Asset Import Tools
+# ============================================================
+
+@mcp.tool()
+def import_fbx(
+    source_file: str,
+    destination_path: str = "/Game/Meshes",
+    asset_name: str = "",
+    combine_meshes: bool = True,
+    compute_normals: bool = True,
+    import_materials: bool = True,
+    import_textures: bool = True,
+    auto_generate_collision: bool = True,
+    scale_factor: float = 1.0,
+    build_nanite: bool = False
+) -> Dict[str, Any]:
+    """Import an FBX file as a static mesh with configurable settings.
+
+    Handles common import issues automatically:
+    - Missing smoothing groups (compute_normals=True computes normals from geometry)
+    - Separate mesh parts (combine_meshes=True merges into single mesh)
+    - Scale conversion (scale_factor adjusts if model uses meters vs cm)
+
+    Args:
+        source_file: Absolute path to the FBX file on disk
+        destination_path: Content Browser path (e.g., "/Game/PRK/Items")
+        asset_name: Override the imported asset name (empty = use filename)
+        combine_meshes: Merge all sub-meshes into a single static mesh
+        compute_normals: Compute normals from geometry (fixes faceted imports)
+        import_materials: Import/create materials from the FBX file
+        import_textures: Import textures referenced by materials
+        auto_generate_collision: Generate simple collision if none in FBX
+        scale_factor: Uniform scale multiplier (1.0 = no change, 100.0 = meters to cm)
+        build_nanite: Enable Nanite on the imported mesh
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("import_fbx", {
+            "source_file": source_file,
+            "destination_path": destination_path,
+            "asset_name": asset_name,
+            "combine_meshes": combine_meshes,
+            "compute_normals": compute_normals,
+            "import_materials": import_materials,
+            "import_textures": import_textures,
+            "auto_generate_collision": auto_generate_collision,
+            "scale_factor": scale_factor,
+            "build_nanite": build_nanite
+        })
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"import_fbx error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+# =============================================================================
+# Widget Blueprint Tools
+# =============================================================================
+
+@mcp.tool()
+def analyze_widget_blueprint(asset_path: str) -> Dict[str, Any]:
+    """Analyze a Widget Blueprint's widget tree structure.
+
+    Returns the full widget hierarchy including widget classes, names,
+    visibility, slot info, and type-specific properties (text, brush, percent, etc.).
+
+    Args:
+        asset_path: Full asset path to the Widget Blueprint (e.g., "/Game/UI/WBP_HUD")
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("analyze_widget_blueprint", {"asset_path": asset_path})
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"analyze_widget_blueprint error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def get_widget_details(asset_path: str, widget_name: str) -> Dict[str, Any]:
+    """Get detailed property dump of a specific widget in a Widget Blueprint.
+
+    Returns all UPROPERTY values via reflection, including slot properties.
+
+    Args:
+        asset_path: Full asset path to the Widget Blueprint
+        widget_name: Name of the widget to inspect (e.g., "TextBlock_0")
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("get_widget_details", {
+            "asset_path": asset_path,
+            "widget_name": widget_name
+        })
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"get_widget_details error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def create_widget_blueprint(
+    asset_path: str,
+    root_widget_class: str = "CanvasPanel",
+    parent_class: str = "UserWidget"
+) -> Dict[str, Any]:
+    """Create a new Widget Blueprint asset.
+
+    Args:
+        asset_path: Full asset path for the new widget (e.g., "/Game/UI/WBP_NewWidget")
+        root_widget_class: Class for the root panel widget. Default "CanvasPanel".
+                           Common values: CanvasPanel, VerticalBox, HorizontalBox, Overlay
+        parent_class: Parent UserWidget class. Default "UserWidget".
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {
+            "asset_path": asset_path,
+            "root_widget_class": root_widget_class,
+            "parent_class": parent_class
+        }
+        response = unreal.send_command("create_widget_blueprint", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"create_widget_blueprint error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def add_widget_child(
+    asset_path: str,
+    widget_class: str,
+    widget_name: str,
+    parent_name: str = "",
+    properties: Dict[str, Any] = None,
+    slot_properties: Dict[str, Any] = None,
+    index: int = -1
+) -> Dict[str, Any]:
+    """Add a widget to a Widget Blueprint's widget tree.
+
+    If parent_name is empty, sets the widget as root (fails if root exists).
+    After adding widgets, call compile_widget_blueprint to finalize changes.
+
+    Args:
+        asset_path: Full asset path to the Widget Blueprint
+        widget_class: Widget class to create. Short name or full path. Common types:
+                      TextBlock, Button, Image, ProgressBar, CanvasPanel,
+                      HorizontalBox, VerticalBox, Overlay, Border, SizeBox,
+                      ScrollBox, Spacer, CheckBox, Slider, EditableTextBox,
+                      RichTextBlock, ComboBoxString, WidgetSwitcher, GridPanel, WrapBox
+        widget_name: Name for the new widget (e.g., "HealthBar")
+        parent_name: Name of parent panel widget. Empty string = set as root.
+        properties: Optional dict of UPROPERTY values to set on the widget
+                    (e.g., {"Text": "Hello", "ColorAndOpacity": {"R": 1, "G": 0, "B": 0, "A": 1}})
+        slot_properties: Optional dict of properties to set on the widget's slot
+        index: Child index for insertion order (-1 = append to end)
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {
+            "asset_path": asset_path,
+            "widget_class": widget_class,
+            "widget_name": widget_name,
+        }
+        if parent_name:
+            params["parent_name"] = parent_name
+        if properties is not None:
+            params["properties"] = properties
+        if slot_properties is not None:
+            params["slot_properties"] = slot_properties
+        if index >= 0:
+            params["index"] = index
+        response = unreal.send_command("add_widget_child", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"add_widget_child error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def set_widget_properties(
+    asset_path: str,
+    widget_name: str,
+    properties: Dict[str, Any] = None,
+    slot_properties: Dict[str, Any] = None
+) -> Dict[str, Any]:
+    """Set properties on a widget and/or its slot in a Widget Blueprint.
+
+    Uses UPROPERTY reflection, so any exposed property can be set.
+    Only properties present in the dict are modified; others are untouched.
+
+    Args:
+        asset_path: Full asset path to the Widget Blueprint
+        widget_name: Name of the widget to modify
+        properties: Dict of property_name -> value for the widget itself
+        slot_properties: Dict of property_name -> value for the widget's slot
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {
+            "asset_path": asset_path,
+            "widget_name": widget_name,
+        }
+        if properties is not None:
+            params["properties"] = properties
+        if slot_properties is not None:
+            params["slot_properties"] = slot_properties
+        response = unreal.send_command("set_widget_properties", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"set_widget_properties error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def remove_widget(asset_path: str, widget_name: str) -> Dict[str, Any]:
+    """Remove a widget from a Widget Blueprint's widget tree.
+
+    If the widget is the root, clears the root. Removes the widget and all
+    its sub-widgets from the tree.
+
+    Args:
+        asset_path: Full asset path to the Widget Blueprint
+        widget_name: Name of the widget to remove
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("remove_widget", {
+            "asset_path": asset_path,
+            "widget_name": widget_name
+        })
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"remove_widget error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def replace_widget_root(
+    asset_path: str,
+    new_root_class: str,
+    new_root_name: str = "",
+    migrate_children: bool = True
+) -> Dict[str, Any]:
+    """Replace the root widget of a Widget Blueprint.
+
+    Optionally migrates children from the old root to the new root.
+
+    Args:
+        asset_path: Full asset path to the Widget Blueprint
+        new_root_class: Class for the new root (must be a panel widget, e.g.,
+                        CanvasPanel, VerticalBox, HorizontalBox, Overlay)
+        new_root_name: Name for the new root. Empty = auto-generated from class name.
+        migrate_children: If True, moves children from old root to new root.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {
+            "asset_path": asset_path,
+            "new_root_class": new_root_class,
+            "migrate_children": migrate_children
+        }
+        if new_root_name:
+            params["new_root_name"] = new_root_name
+        response = unreal.send_command("replace_widget_root", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"replace_widget_root error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def compile_widget_blueprint(asset_path: str) -> Dict[str, Any]:
+    """Compile a Widget Blueprint after making changes.
+
+    Should be called after structural changes (add/remove widgets) or
+    property changes that affect bindings.
+
+    Args:
+        asset_path: Full asset path to the Widget Blueprint
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("compile_widget_blueprint", {"asset_path": asset_path})
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"compile_widget_blueprint error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+# =============================================================================
+# Skeletal Mesh Tools
+# =============================================================================
+
+@mcp.tool()
+def get_skeletal_mesh_info(
+    asset_path: str,
+    include_bones: bool = True
+) -> Dict[str, Any]:
+    """Read a Skeletal Mesh asset and return its sockets, bones, and metadata.
+
+    Use this to inspect what sockets and bones exist on a character skeleton,
+    diagnose weapon attachment issues, or verify socket names match weapon data assets.
+
+    Args:
+        asset_path: Full asset path to the SkeletalMesh
+                    (e.g., "/Game/Characters/SK_Mannequin")
+        include_bones: Include full bone hierarchy. Default True.
+                       Set to False for large skeletons to reduce output size.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {
+            "asset_path": asset_path,
+            "include_bones": include_bones
+        }
+        response = unreal.send_command("get_skeletal_mesh_info", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"get_skeletal_mesh_info error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+# =============================================================================
+# Animation Blueprint Tools
+# =============================================================================
+
+@mcp.tool()
+def create_anim_blueprint(
+    name: str,
+    skeleton_path: str,
+    parent_class: str = "AnimInstance",
+    path: str = "/Game/AnimBlueprints/",
+    preview_mesh: str = ""
+) -> Dict[str, Any]:
+    """Create a new Animation Blueprint with a target skeleton.
+
+    Args:
+        name: Asset name for the new AnimBlueprint
+        skeleton_path: Content path to the USkeleton asset (e.g., "/Game/Characters/Mannequin/Skeleton")
+        parent_class: Parent class name (default: AnimInstance). Can be a custom UAnimInstance subclass.
+        path: Content Browser folder to create in (default: /Game/AnimBlueprints/)
+        preview_mesh: Optional path to a preview skeletal mesh
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {
+            "name": name,
+            "skeleton_path": skeleton_path,
+            "parent_class": parent_class,
+            "path": path,
+        }
+        if preview_mesh:
+            params["preview_mesh"] = preview_mesh
+        response = unreal.send_command("create_anim_blueprint", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"create_anim_blueprint error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def read_anim_blueprint(
+    name: str = "",
+    asset_path: str = ""
+) -> Dict[str, Any]:
+    """Read and analyze an existing Animation Blueprint's structure.
+
+    Returns skeleton, parent class, variables, state machines (with states and transitions).
+
+    Args:
+        name: Asset name to search for in common directories
+        asset_path: Full content path to the AnimBlueprint asset
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {}
+        if name:
+            params["name"] = name
+        if asset_path:
+            params["asset_path"] = asset_path
+        response = unreal.send_command("read_anim_blueprint", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"read_anim_blueprint error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def add_state_machine(
+    blueprint_name: str,
+    name: str = "Locomotion",
+    pos_x: float = 200.0,
+    pos_y: float = 0.0
+) -> Dict[str, Any]:
+    """Add a state machine node to an Animation Blueprint's AnimGraph.
+
+    Args:
+        blueprint_name: Name or path of the AnimBlueprint
+        name: Name for the state machine (default: Locomotion)
+        pos_x: X position in the AnimGraph
+        pos_y: Y position in the AnimGraph
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("add_state_machine", {
+            "blueprint_name": blueprint_name,
+            "name": name,
+            "pos_x": pos_x,
+            "pos_y": pos_y,
+        })
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"add_state_machine error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def add_anim_state(
+    blueprint_name: str,
+    state_machine_name: str,
+    state_name: str,
+    pos_x: float = 300.0,
+    pos_y: float = 0.0
+) -> Dict[str, Any]:
+    """Add a state to a state machine in an Animation Blueprint.
+
+    Args:
+        blueprint_name: Name or path of the AnimBlueprint
+        state_machine_name: Name of the state machine to add the state to
+        state_name: Name for the new state
+        pos_x: X position in the state machine graph
+        pos_y: Y position in the state machine graph
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("add_state", {
+            "blueprint_name": blueprint_name,
+            "state_machine_name": state_machine_name,
+            "state_name": state_name,
+            "pos_x": pos_x,
+            "pos_y": pos_y,
+        })
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"add_anim_state error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def add_anim_transition(
+    blueprint_name: str,
+    state_machine_name: str,
+    from_state: str,
+    to_state: str,
+    crossfade_duration: float = 0.2,
+    priority: int = 1
+) -> Dict[str, Any]:
+    """Add a transition between two states in a state machine.
+
+    Args:
+        blueprint_name: Name or path of the AnimBlueprint
+        state_machine_name: Name of the state machine
+        from_state: Source state name
+        to_state: Target state name
+        crossfade_duration: Blend duration in seconds (default: 0.2)
+        priority: Transition priority (lower = higher priority, default: 1)
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("add_transition", {
+            "blueprint_name": blueprint_name,
+            "state_machine_name": state_machine_name,
+            "from_state": from_state,
+            "to_state": to_state,
+            "crossfade_duration": crossfade_duration,
+            "priority": priority,
+        })
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"add_anim_transition error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def set_default_anim_state(
+    blueprint_name: str,
+    state_machine_name: str,
+    state_name: str
+) -> Dict[str, Any]:
+    """Set the default (entry) state for a state machine.
+
+    Args:
+        blueprint_name: Name or path of the AnimBlueprint
+        state_machine_name: Name of the state machine
+        state_name: Name of the state to set as default entry point
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("set_default_state", {
+            "blueprint_name": blueprint_name,
+            "state_machine_name": state_machine_name,
+            "state_name": state_name,
+        })
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"set_default_anim_state error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def set_state_animation(
+    blueprint_name: str,
+    state_machine_name: str,
+    state_name: str,
+    animation_path: str,
+    loop: bool = True
+) -> Dict[str, Any]:
+    """Set the animation for a state by placing a Sequence Player node inside it.
+
+    Creates an AnimGraphNode_SequencePlayer inside the state's graph and connects
+    it to the state's output pose result node.
+
+    Args:
+        blueprint_name: Name or path of the AnimBlueprint
+        state_machine_name: Name of the state machine
+        state_name: Name of the state to set animation for
+        animation_path: Content path to the animation sequence asset
+        loop: Whether the animation should loop (default: True)
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("set_state_animation", {
+            "blueprint_name": blueprint_name,
+            "state_machine_name": state_machine_name,
+            "state_name": state_name,
+            "animation_path": animation_path,
+            "loop": loop,
+        })
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"set_state_animation error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def set_transition_rule(
+    blueprint_name: str,
+    state_machine_name: str,
+    from_state: str,
+    to_state: str,
+    rule_type: str = "automatic",
+    automatic_rule_trigger_time: float = -1.0,
+    trigger_time: float = 0.0,
+    crossfade_duration: float = -1.0
+) -> Dict[str, Any]:
+    """Configure the transition rule for an existing transition.
+
+    Args:
+        blueprint_name: Name or path of the AnimBlueprint
+        state_machine_name: Name of the state machine
+        from_state: Source state name
+        to_state: Target state name
+        rule_type: 'automatic' (triggers based on sequence remaining time) or 'time_remaining' (manual threshold)
+        automatic_rule_trigger_time: For 'automatic': < 0 means trigger crossfade_duration before end, >= 0 is explicit time before end
+        trigger_time: For 'time_remaining': seconds before animation end to trigger
+        crossfade_duration: Override crossfade duration (< 0 to keep existing)
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {
+            "blueprint_name": blueprint_name,
+            "state_machine_name": state_machine_name,
+            "from_state": from_state,
+            "to_state": to_state,
+            "rule_type": rule_type,
+        }
+        if rule_type == "automatic":
+            params["automatic_rule_trigger_time"] = automatic_rule_trigger_time
+        elif rule_type == "time_remaining":
+            params["trigger_time"] = trigger_time
+        if crossfade_duration >= 0:
+            params["crossfade_duration"] = crossfade_duration
+        response = unreal.send_command("set_transition_rule", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"set_transition_rule error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def add_blend_space_player(
+    blueprint_name: str,
+    state_machine_name: str,
+    state_name: str,
+    blend_space_path: str
+) -> Dict[str, Any]:
+    """Add a Blend Space Player node inside a state, replacing any existing pose connection.
+
+    Args:
+        blueprint_name: Name or path of the AnimBlueprint
+        state_machine_name: Name of the state machine
+        state_name: Name of the state to add the blend space to
+        blend_space_path: Content path to the BlendSpace asset
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("add_blend_space_player", {
+            "blueprint_name": blueprint_name,
+            "state_machine_name": state_machine_name,
+            "state_name": state_name,
+            "blend_space_path": blend_space_path,
+        })
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"add_blend_space_player error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def connect_anim_nodes(
+    blueprint_name: str,
+    source_node_id: Union[str, int],
+    target_node_id: Union[str, int],
+    source_pin: str = "Pose",
+    target_pin: str = "Result"
+) -> Dict[str, Any]:
+    """Connect two AnimGraph nodes by their pin names.
+
+    Args:
+        blueprint_name: Name or path of the AnimBlueprint
+        source_node_id: Unique ID of the source node (returned by add_* commands). Accepts string or numeric ID.
+        target_node_id: Unique ID of the target node. Accepts string or numeric ID.
+        source_pin: Name of the output pin on the source node (default: Pose)
+        target_pin: Name of the input pin on the target node (default: Result)
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("connect_anim_nodes", {
+            "blueprint_name": blueprint_name,
+            "source_node_id": str(source_node_id),
+            "target_node_id": str(target_node_id),
+            "source_pin": source_pin,
+            "target_pin": target_pin,
+        })
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"connect_anim_nodes error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def get_state_machine_info(
+    blueprint_name: str,
+    state_machine_name: str
+) -> Dict[str, Any]:
+    """Get detailed information about a state machine including all states, transitions, and their properties.
+
+    Args:
+        blueprint_name: Name or path of the AnimBlueprint
+        state_machine_name: Name of the state machine to inspect
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("get_state_machine_info", {
+            "blueprint_name": blueprint_name,
+            "state_machine_name": state_machine_name,
+        })
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"get_state_machine_info error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def add_anim_node(
+    asset_path: str,
+    node_type: str,
+    pos_x: float = 0.0,
+    pos_y: float = 0.0,
+    bound_bone: str = "",
+    chain_end: str = "",
+    is_chain: bool = True,
+    gravity_scale: float = 1.0,
+    linear_damping: float = 0.8,
+    angular_damping: float = 0.8,
+    use_attached_parent: bool = True,
+    copy_curves: bool = True
+) -> Dict[str, Any]:
+    """Add an AnimGraph node (CopyPoseFromMesh or AnimDynamics) to an Animation Blueprint.
+
+    Returns the node_id which can be used with connect_anim_nodes to wire nodes together.
+
+    Args:
+        asset_path: Full content path to the AnimBlueprint (e.g., "/Game/PRK/Items/Meshes/Shackles/ABP_Shackles")
+        node_type: Type of node to add. Supported: "CopyPoseFromMesh", "AnimDynamics"
+        pos_x: X position in the AnimGraph
+        pos_y: Y position in the AnimGraph
+        bound_bone: (AnimDynamics) Name of the bone to attach physics body to (e.g., "chain_01")
+        chain_end: (AnimDynamics) End bone of chain (e.g., "chain_07"). Enables chain mode.
+        is_chain: (AnimDynamics) Whether to simulate as a chain between bound_bone and chain_end
+        gravity_scale: (AnimDynamics) Gravity multiplier (default 1.0)
+        linear_damping: (AnimDynamics) Linear damping override (default 0.8)
+        angular_damping: (AnimDynamics) Angular damping override (default 0.8)
+        use_attached_parent: (CopyPoseFromMesh) Use attached parent as source mesh (default true)
+        copy_curves: (CopyPoseFromMesh) Copy animation curves from source (default true)
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {
+            "asset_path": asset_path,
+            "node_type": node_type,
+            "pos_x": pos_x,
+            "pos_y": pos_y,
+        }
+        if node_type.lower() == "copyposefrommesh":
+            params["use_attached_parent"] = use_attached_parent
+            params["copy_curves"] = copy_curves
+        elif node_type.lower() == "animdynamics":
+            if bound_bone:
+                params["bound_bone"] = bound_bone
+            if chain_end:
+                params["chain_end"] = chain_end
+            params["is_chain"] = is_chain
+            params["gravity_scale"] = gravity_scale
+            params["linear_damping"] = linear_damping
+            params["angular_damping"] = angular_damping
+        response = unreal.send_command("add_anim_node", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"add_anim_node error: {e}")
+        return {"success": False, "message": str(e)}
 
 
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")
-    mcp.run(transport='stdio') 
+    mcp.run(transport='stdio')

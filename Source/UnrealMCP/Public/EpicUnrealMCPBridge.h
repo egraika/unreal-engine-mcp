@@ -15,12 +15,14 @@
 #include "Commands/EpicUnrealMCPMaterialCommands.h"
 #include "Commands/EpicUnrealMCPRVTCommands.h"
 #include "Commands/EpicUnrealMCPAnimationCommands.h"
+#include "Commands/EpicUnrealMCPAnimBlueprintCommands.h"
 #include "Commands/EpicUnrealMCPDataAssetCommands.h"
 #include "Commands/EpicUnrealMCPDataTableCommands.h"
 #include "Commands/EpicUnrealMCPMPCCommands.h"
 #include "Commands/EpicUnrealMCPSoundCommands.h"
 #include "Commands/EpicUnrealMCPWidgetCommands.h"
 #include "Commands/EpicUnrealMCPWorldCommands.h"
+#include "Commands/EpicUnrealMCPAssetImportCommands.h"
 #include "EpicUnrealMCPBridge.generated.h"
 
 class FMCPServerRunnable;
@@ -71,10 +73,12 @@ private:
 	TSharedPtr<FEpicUnrealMCPMaterialCommands> MaterialCommands;
 	TSharedPtr<FEpicUnrealMCPRVTCommands> RVTCommands;
 	TSharedPtr<FEpicUnrealMCPAnimationCommands> AnimationCommands;
+	TSharedPtr<FEpicUnrealMCPAnimBlueprintCommands> AnimBlueprintCommands;
 	TSharedPtr<FEpicUnrealMCPDataAssetCommands> DataAssetCommands;
 	TSharedPtr<FEpicUnrealMCPDataTableCommands> DataTableCommands;
 	TSharedPtr<FEpicUnrealMCPMPCCommands> MPCCommands;
 	TSharedPtr<FEpicUnrealMCPSoundCommands> SoundCommands;
 	TSharedPtr<FEpicUnrealMCPWidgetCommands> WidgetCommands;
 	TSharedPtr<FEpicUnrealMCPWorldCommands> WorldCommands;
+	TSharedPtr<FEpicUnrealMCPAssetImportCommands> AssetImportCommands;
 };

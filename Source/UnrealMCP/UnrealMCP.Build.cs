@@ -41,10 +41,13 @@ public class UnrealMCP : ModuleRules
 				"Json",
 				"JsonUtilities",
 				"DeveloperSettings",
+				"GameplayTags",
 				"PhysicsCore",
 				"UnrealEd",           // For Blueprint editing
 				"BlueprintGraph",     // For K2Node classes (F15-F22)
-				"KismetCompiler"      // For Blueprint compilation (F15-F22)
+				"KismetCompiler",     // For Blueprint compilation (F15-F22)
+				"AnimGraph",          // For UAnimGraphNode_*, UAnimStateNode, animation graph schemas
+				"AnimGraphRuntime"    // For FAnimNode_* runtime structs
 			}
 		);
 		
@@ -63,7 +66,9 @@ public class UnrealMCP : ModuleRules
 				"Landscape",
 				"UMG",
 				"UMGEditor",
-				"PRK"
+				"PRK",
+				"AthenaAI",
+				"AssetTools"
 			}
 		);
 		

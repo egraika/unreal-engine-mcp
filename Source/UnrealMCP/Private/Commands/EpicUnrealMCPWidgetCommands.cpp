@@ -4,7 +4,13 @@
 
 #include "EditorAssetLibrary.h"
 #include "WidgetBlueprint.h"
+#include "WidgetBlueprintFactory.h"
 #include "Blueprint/WidgetTree.h"
+#include "Blueprint/UserWidget.h"
+#include "Kismet2/KismetEditorUtilities.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+
 #include "Components/Widget.h"
 #include "Components/PanelWidget.h"
 #include "Components/TextBlock.h"
@@ -13,9 +19,25 @@
 #include "Components/ProgressBar.h"
 #include "Components/CanvasPanel.h"
 #include "Components/CanvasPanelSlot.h"
+#include "Components/HorizontalBox.h"
 #include "Components/HorizontalBoxSlot.h"
+#include "Components/VerticalBox.h"
 #include "Components/VerticalBoxSlot.h"
+#include "Components/Overlay.h"
 #include "Components/OverlaySlot.h"
+#include "Components/Border.h"
+#include "Components/SizeBox.h"
+#include "Components/ScrollBox.h"
+#include "Components/ScaleBox.h"
+#include "Components/WrapBox.h"
+#include "Components/GridPanel.h"
+#include "Components/UniformGridPanel.h"
+#include "Components/Spacer.h"
+#include "Components/CheckBox.h"
+#include "Components/Slider.h"
+#include "Components/EditableTextBox.h"
+#include "Components/RichTextBlock.h"
+#include "Components/WidgetSwitcher.h"
 
 FEpicUnrealMCPWidgetCommands::FEpicUnrealMCPWidgetCommands()
 {
@@ -35,13 +57,117 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPWidgetCommands::HandleCommand(const FStrin
 	{
 		return HandleGetWidgetDetails(Params);
 	}
+	else if (CommandType == TEXT("create_widget_blueprint"))
+	{
+		return HandleCreateWidgetBlueprint(Params);
+	}
+	else if (CommandType == TEXT("add_widget_child"))
+	{
+		return HandleAddWidgetChild(Params);
+	}
+	else if (CommandType == TEXT("set_widget_properties"))
+	{
+		return HandleSetWidgetProperties(Params);
+	}
+	else if (CommandType == TEXT("remove_widget"))
+	{
+		return HandleRemoveWidget(Params);
+	}
+	else if (CommandType == TEXT("replace_widget_root"))
+	{
+		return HandleReplaceWidgetRoot(Params);
+	}
+	else if (CommandType == TEXT("compile_widget_blueprint"))
+	{
+		return HandleCompileWidgetBlueprint(Params);
+	}
 
 	return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Unknown Widget command: %s"), *CommandType));
 }
 
 // ============================================================================
-// Helper: Count all widgets in a tree recursively
+// Shared Helpers
 // ============================================================================
+
+UWidgetBlueprint* FEpicUnrealMCPWidgetCommands::LoadWidgetBlueprint(const TSharedPtr<FJsonObject>& Params, TSharedPtr<FJsonObject>& OutError)
+{
+	if (!Params->HasField(TEXT("asset_path")))
+	{
+		OutError = FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing required field: asset_path"));
+		return nullptr;
+	}
+
+	const FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+	UObject* LoadedAsset = UEditorAssetLibrary::LoadAsset(AssetPath);
+	if (!LoadedAsset)
+	{
+		OutError = FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Failed to load asset: %s"), *AssetPath));
+		return nullptr;
+	}
+
+	UWidgetBlueprint* WidgetBlueprint = Cast<UWidgetBlueprint>(LoadedAsset);
+	if (!WidgetBlueprint)
+	{
+		OutError = FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Asset is not a UWidgetBlueprint: %s (is %s)"), *AssetPath, *LoadedAsset->GetClass()->GetName()));
+		return nullptr;
+	}
+
+	if (!WidgetBlueprint->WidgetTree)
+	{
+		OutError = FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Widget blueprint has no WidgetTree"));
+		return nullptr;
+	}
+
+	return WidgetBlueprint;
+}
+
+UClass* FEpicUnrealMCPWidgetCommands::ResolveWidgetClass(const FString& ClassName)
+{
+	// If it looks like a full path (contains /), try direct load
+	if (ClassName.Contains(TEXT("/")))
+	{
+		UClass* FoundClass = FindObject<UClass>(nullptr, *ClassName);
+		if (!FoundClass)
+		{
+			FoundClass = LoadObject<UClass>(nullptr, *ClassName);
+		}
+		return FoundClass;
+	}
+
+	// Try exact name
+	UClass* FoundClass = FindFirstObject<UClass>(*ClassName, EFindFirstObjectOptions::ExactClass);
+
+	// Try with U prefix
+	if (!FoundClass && !ClassName.StartsWith(TEXT("U")))
+	{
+		FString WithPrefix = TEXT("U") + ClassName;
+		FoundClass = FindFirstObject<UClass>(*WithPrefix, EFindFirstObjectOptions::ExactClass);
+	}
+
+	// Try /Script/UMG.ClassName
+	if (!FoundClass)
+	{
+		FString ScriptPath = FString::Printf(TEXT("/Script/UMG.%s"), *ClassName);
+		FoundClass = FindObject<UClass>(nullptr, *ScriptPath);
+		if (!FoundClass)
+		{
+			FoundClass = LoadObject<UClass>(nullptr, *ScriptPath);
+		}
+	}
+
+	// Try /Script/UMG.UClassName
+	if (!FoundClass && !ClassName.StartsWith(TEXT("U")))
+	{
+		FString ScriptPath = FString::Printf(TEXT("/Script/UMG.U%s"), *ClassName);
+		FoundClass = FindObject<UClass>(nullptr, *ScriptPath);
+		if (!FoundClass)
+		{
+			FoundClass = LoadObject<UClass>(nullptr, *ScriptPath);
+		}
+	}
+
+	return FoundClass;
+}
 
 static int32 CountWidgets(UWidget* Widget)
 {
@@ -64,10 +190,6 @@ static int32 CountWidgets(UWidget* Widget)
 	return Count;
 }
 
-// ============================================================================
-// Helper: Convert ESlateVisibility to string
-// ============================================================================
-
 static FString VisibilityToString(ESlateVisibility Visibility)
 {
 	switch (Visibility)
@@ -81,10 +203,6 @@ static FString VisibilityToString(ESlateVisibility Visibility)
 	}
 }
 
-// ============================================================================
-// Helper: Convert EHorizontalAlignment to string
-// ============================================================================
-
 static FString HAlignToString(EHorizontalAlignment Align)
 {
 	switch (Align)
@@ -96,10 +214,6 @@ static FString HAlignToString(EHorizontalAlignment Align)
 	default:		return TEXT("Unknown");
 	}
 }
-
-// ============================================================================
-// Helper: Convert EVerticalAlignment to string
-// ============================================================================
 
 static FString VAlignToString(EVerticalAlignment Align)
 {
@@ -113,10 +227,6 @@ static FString VAlignToString(EVerticalAlignment Align)
 	}
 }
 
-// ============================================================================
-// Helper: Convert ESizeRule to string
-// ============================================================================
-
 static FString SizeRuleToString(ESlateSizeRule::Type Rule)
 {
 	switch (Rule)
@@ -126,10 +236,6 @@ static FString SizeRuleToString(ESlateSizeRule::Type Rule)
 	default:			return TEXT("Unknown");
 	}
 }
-
-// ============================================================================
-// Helper: Serialize FMargin (padding) to JSON
-// ============================================================================
 
 static TSharedPtr<FJsonObject> MarginToJson(const FMargin& Margin)
 {
@@ -193,35 +299,20 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPWidgetCommands::HandleAnalyzeWidgetBluepri
 
 TSharedPtr<FJsonObject> FEpicUnrealMCPWidgetCommands::HandleGetWidgetDetails(const TSharedPtr<FJsonObject>& Params)
 {
-	if (!Params->HasField(TEXT("asset_path")))
+	TSharedPtr<FJsonObject> Error;
+	UWidgetBlueprint* WidgetBlueprint = LoadWidgetBlueprint(Params, Error);
+	if (!WidgetBlueprint)
 	{
-		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing required field: asset_path"));
+		return Error;
 	}
+
 	if (!Params->HasField(TEXT("widget_name")))
 	{
 		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing required field: widget_name"));
 	}
 
-	const FString AssetPath = Params->GetStringField(TEXT("asset_path"));
 	const FString WidgetName = Params->GetStringField(TEXT("widget_name"));
-
-	UObject* LoadedAsset = UEditorAssetLibrary::LoadAsset(AssetPath);
-	if (!LoadedAsset)
-	{
-		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Failed to load asset: %s"), *AssetPath));
-	}
-
-	UWidgetBlueprint* WidgetBlueprint = Cast<UWidgetBlueprint>(LoadedAsset);
-	if (!WidgetBlueprint)
-	{
-		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Asset is not a UWidgetBlueprint: %s (is %s)"), *AssetPath, *LoadedAsset->GetClass()->GetName()));
-	}
-
 	UWidgetTree* WidgetTree = WidgetBlueprint->WidgetTree;
-	if (!WidgetTree)
-	{
-		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Widget blueprint has no WidgetTree"));
-	}
 
 	UWidget* FoundWidget = WidgetTree->FindWidget(FName(*WidgetName));
 	if (!FoundWidget)
@@ -231,7 +322,7 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPWidgetCommands::HandleGetWidgetDetails(con
 
 	TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
 	Result->SetBoolField(TEXT("success"), true);
-	Result->SetStringField(TEXT("asset_path"), AssetPath);
+	Result->SetStringField(TEXT("asset_path"), Params->GetStringField(TEXT("asset_path")));
 	Result->SetStringField(TEXT("widget_name"), FoundWidget->GetName());
 	Result->SetStringField(TEXT("widget_class"), FoundWidget->GetClass()->GetName());
 
@@ -248,7 +339,6 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPWidgetCommands::HandleGetWidgetDetails(con
 		TSharedPtr<FJsonObject> SlotObj = MakeShareable(new FJsonObject);
 		SlotObj->SetStringField(TEXT("slot_type"), FoundWidget->Slot->GetClass()->GetName());
 
-		// Serialize slot properties via reflection as well
 		TSharedPtr<FJsonObject> SlotProperties = FEpicUnrealMCPPropertyUtils::SerializeObjectProperties(FoundWidget->Slot);
 		if (SlotProperties.IsValid())
 		{
@@ -257,6 +347,514 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPWidgetCommands::HandleGetWidgetDetails(con
 
 		Result->SetObjectField(TEXT("slot"), SlotObj);
 	}
+
+	return Result;
+}
+
+// ============================================================================
+// create_widget_blueprint
+// ============================================================================
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPWidgetCommands::HandleCreateWidgetBlueprint(const TSharedPtr<FJsonObject>& Params)
+{
+	if (!Params->HasField(TEXT("asset_path")))
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing required field: asset_path"));
+	}
+
+	const FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+
+	// Check if asset already exists
+	if (UEditorAssetLibrary::DoesAssetExist(AssetPath))
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Asset already exists: %s"), *AssetPath));
+	}
+
+	// Resolve parent class (default: UUserWidget)
+	UClass* ParentClass = UUserWidget::StaticClass();
+	if (Params->HasField(TEXT("parent_class")))
+	{
+		const FString ParentClassName = Params->GetStringField(TEXT("parent_class"));
+		if (!ParentClassName.IsEmpty() && ParentClassName != TEXT("UserWidget"))
+		{
+			UClass* ResolvedParent = ResolveWidgetClass(ParentClassName);
+			if (!ResolvedParent || !ResolvedParent->IsChildOf(UUserWidget::StaticClass()))
+			{
+				return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Parent class '%s' is not a UUserWidget subclass"), *ParentClassName));
+			}
+			ParentClass = ResolvedParent;
+		}
+	}
+
+	// Resolve root widget class (default: UCanvasPanel)
+	UClass* RootWidgetClass = UCanvasPanel::StaticClass();
+	if (Params->HasField(TEXT("root_widget_class")))
+	{
+		const FString RootClassName = Params->GetStringField(TEXT("root_widget_class"));
+		if (!RootClassName.IsEmpty())
+		{
+			UClass* ResolvedRoot = ResolveWidgetClass(RootClassName);
+			if (!ResolvedRoot || !ResolvedRoot->IsChildOf(UPanelWidget::StaticClass()))
+			{
+				return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Root widget class '%s' is not a UPanelWidget subclass"), *RootClassName));
+			}
+			RootWidgetClass = ResolvedRoot;
+		}
+	}
+
+	// Split asset_path into package path and asset name
+	FString PackagePath, AssetName;
+	AssetPath.Split(TEXT("/"), &PackagePath, &AssetName, ESearchCase::IgnoreCase, ESearchDir::FromEnd);
+	if (AssetName.IsEmpty())
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Invalid asset_path format: %s"), *AssetPath));
+	}
+
+	// Create the package
+	UPackage* Package = CreatePackage(*AssetPath);
+	if (!Package)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Failed to create package for: %s"), *AssetPath));
+	}
+
+	// Create the widget blueprint via factory
+	UWidgetBlueprintFactory* Factory = NewObject<UWidgetBlueprintFactory>();
+	Factory->ParentClass = ParentClass;
+	Factory->AddToRoot(); // Prevent GC during creation
+
+	UObject* NewAsset = Factory->FactoryCreateNew(
+		UWidgetBlueprint::StaticClass(),
+		Package,
+		*AssetName,
+		RF_Standalone | RF_Public,
+		nullptr,
+		GWarn
+	);
+
+	Factory->RemoveFromRoot();
+
+	if (!NewAsset)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("FactoryCreateNew failed to create Widget Blueprint"));
+	}
+
+	UWidgetBlueprint* NewBP = CastChecked<UWidgetBlueprint>(NewAsset);
+
+	// Set root widget if the factory didn't create one (or if we want a different root)
+	if (NewBP->WidgetTree && !NewBP->WidgetTree->RootWidget && RootWidgetClass)
+	{
+		UWidget* Root = NewBP->WidgetTree->ConstructWidget<UWidget>(RootWidgetClass);
+		NewBP->WidgetTree->RootWidget = Root;
+	}
+
+	// Notify asset registry
+	FAssetRegistryModule::AssetCreated(NewAsset);
+	Package->MarkPackageDirty();
+
+	// Build response
+	TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
+	Result->SetBoolField(TEXT("success"), true);
+	Result->SetStringField(TEXT("asset_path"), AssetPath);
+	Result->SetStringField(TEXT("asset_name"), AssetName);
+	Result->SetStringField(TEXT("parent_class"), ParentClass->GetName());
+
+	if (NewBP->WidgetTree && NewBP->WidgetTree->RootWidget)
+	{
+		Result->SetStringField(TEXT("root_widget_name"), NewBP->WidgetTree->RootWidget->GetName());
+		Result->SetStringField(TEXT("root_widget_class"), NewBP->WidgetTree->RootWidget->GetClass()->GetName());
+	}
+
+	return Result;
+}
+
+// ============================================================================
+// add_widget_child
+// ============================================================================
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPWidgetCommands::HandleAddWidgetChild(const TSharedPtr<FJsonObject>& Params)
+{
+	TSharedPtr<FJsonObject> Error;
+	UWidgetBlueprint* WidgetBlueprint = LoadWidgetBlueprint(Params, Error);
+	if (!WidgetBlueprint)
+	{
+		return Error;
+	}
+
+	if (!Params->HasField(TEXT("widget_class")))
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing required field: widget_class"));
+	}
+	if (!Params->HasField(TEXT("widget_name")))
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing required field: widget_name"));
+	}
+
+	const FString WidgetClassName = Params->GetStringField(TEXT("widget_class"));
+	const FString WidgetName = Params->GetStringField(TEXT("widget_name"));
+	const FString ParentName = Params->HasField(TEXT("parent_name")) ? Params->GetStringField(TEXT("parent_name")) : TEXT("");
+	const int32 Index = Params->HasField(TEXT("index")) ? static_cast<int32>(Params->GetNumberField(TEXT("index"))) : -1;
+
+	// Resolve widget class
+	UClass* WidgetClass = ResolveWidgetClass(WidgetClassName);
+	if (!WidgetClass || !WidgetClass->IsChildOf(UWidget::StaticClass()))
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Could not resolve widget class: %s"), *WidgetClassName));
+	}
+
+	UWidgetTree* WidgetTree = WidgetBlueprint->WidgetTree;
+
+	// Check name uniqueness
+	FName FinalName(*WidgetName);
+	if (WidgetTree->FindWidget(FinalName))
+	{
+		FinalName = MakeUniqueObjectName(WidgetTree, WidgetClass, FinalName);
+	}
+
+	// Construct widget
+	UWidget* NewWidget = WidgetTree->ConstructWidget<UWidget>(WidgetClass, FinalName);
+	if (!NewWidget)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Failed to construct widget of class: %s"), *WidgetClassName));
+	}
+
+	WidgetBlueprint->Modify();
+
+	FString ActualParentName;
+
+	if (!ParentName.IsEmpty())
+	{
+		// Add as child of specified parent
+		UWidget* ParentWidget = WidgetTree->FindWidget(FName(*ParentName));
+		if (!ParentWidget)
+		{
+			return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Parent widget not found: %s"), *ParentName));
+		}
+
+		UPanelWidget* ParentPanel = Cast<UPanelWidget>(ParentWidget);
+		if (!ParentPanel)
+		{
+			return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Parent widget '%s' is not a panel widget (class: %s)"), *ParentName, *ParentWidget->GetClass()->GetName()));
+		}
+
+		UPanelSlot* Slot = nullptr;
+		if (Index >= 0)
+		{
+			Slot = ParentPanel->InsertChildAt(Index, NewWidget);
+		}
+		else
+		{
+			Slot = ParentPanel->AddChild(NewWidget);
+		}
+
+		if (!Slot)
+		{
+			return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Failed to add child to '%s'. Parent may only accept one child (class: %s)"), *ParentName, *ParentWidget->GetClass()->GetName()));
+		}
+
+		ActualParentName = ParentName;
+	}
+	else
+	{
+		// Set as root
+		if (WidgetTree->RootWidget)
+		{
+			return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Root widget already exists. Specify parent_name to add as child, or use replace_widget_root to change the root."));
+		}
+		WidgetTree->RootWidget = NewWidget;
+		ActualParentName = TEXT("[root]");
+	}
+
+	// Apply properties if provided
+	TArray<FString> PropErrors;
+	if (Params->HasField(TEXT("properties")))
+	{
+		const TSharedPtr<FJsonObject>* PropertiesPtr = nullptr;
+		if (Params->TryGetObjectField(TEXT("properties"), PropertiesPtr) && PropertiesPtr)
+		{
+			FEpicUnrealMCPPropertyUtils::DeserializeObjectProperties(NewWidget, *PropertiesPtr, PropErrors);
+		}
+	}
+
+	// Apply slot properties if provided (only works if widget has a slot, i.e., has a parent)
+	if (Params->HasField(TEXT("slot_properties")) && NewWidget->Slot)
+	{
+		const TSharedPtr<FJsonObject>* SlotPropertiesPtr = nullptr;
+		if (Params->TryGetObjectField(TEXT("slot_properties"), SlotPropertiesPtr) && SlotPropertiesPtr)
+		{
+			FEpicUnrealMCPPropertyUtils::DeserializeObjectProperties(NewWidget->Slot, *SlotPropertiesPtr, PropErrors);
+		}
+	}
+
+	// Mark as variable so it can be referenced in the BP graph
+	NewWidget->bIsVariable = true;
+
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBlueprint);
+
+	// Build response
+	TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
+	Result->SetBoolField(TEXT("success"), true);
+	Result->SetStringField(TEXT("widget_name"), FinalName.ToString());
+	Result->SetStringField(TEXT("widget_class"), WidgetClass->GetName());
+	Result->SetStringField(TEXT("parent"), ActualParentName);
+
+	if (FinalName.ToString() != WidgetName)
+	{
+		Result->SetStringField(TEXT("requested_name"), WidgetName);
+		Result->SetStringField(TEXT("note"), TEXT("Name was modified to ensure uniqueness"));
+	}
+
+	if (NewWidget->Slot)
+	{
+		Result->SetStringField(TEXT("slot_type"), NewWidget->Slot->GetClass()->GetName());
+	}
+
+	if (PropErrors.Num() > 0)
+	{
+		TArray<TSharedPtr<FJsonValue>> ErrorArray;
+		for (const FString& Err : PropErrors)
+		{
+			ErrorArray.Add(MakeShared<FJsonValueString>(Err));
+		}
+		Result->SetArrayField(TEXT("property_errors"), ErrorArray);
+	}
+
+	return Result;
+}
+
+// ============================================================================
+// set_widget_properties
+// ============================================================================
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPWidgetCommands::HandleSetWidgetProperties(const TSharedPtr<FJsonObject>& Params)
+{
+	TSharedPtr<FJsonObject> Error;
+	UWidgetBlueprint* WidgetBlueprint = LoadWidgetBlueprint(Params, Error);
+	if (!WidgetBlueprint)
+	{
+		return Error;
+	}
+
+	if (!Params->HasField(TEXT("widget_name")))
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing required field: widget_name"));
+	}
+
+	const FString WidgetName = Params->GetStringField(TEXT("widget_name"));
+	UWidget* Widget = WidgetBlueprint->WidgetTree->FindWidget(FName(*WidgetName));
+	if (!Widget)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Widget not found: %s"), *WidgetName));
+	}
+
+	WidgetBlueprint->Modify();
+
+	TArray<FString> PropErrors;
+
+	// Apply widget properties
+	if (Params->HasField(TEXT("properties")))
+	{
+		const TSharedPtr<FJsonObject>* PropertiesPtr = nullptr;
+		if (Params->TryGetObjectField(TEXT("properties"), PropertiesPtr) && PropertiesPtr)
+		{
+			FEpicUnrealMCPPropertyUtils::DeserializeObjectProperties(Widget, *PropertiesPtr, PropErrors);
+		}
+	}
+
+	// Apply slot properties
+	if (Params->HasField(TEXT("slot_properties")) && Widget->Slot)
+	{
+		const TSharedPtr<FJsonObject>* SlotPropertiesPtr = nullptr;
+		if (Params->TryGetObjectField(TEXT("slot_properties"), SlotPropertiesPtr) && SlotPropertiesPtr)
+		{
+			FEpicUnrealMCPPropertyUtils::DeserializeObjectProperties(Widget->Slot, *SlotPropertiesPtr, PropErrors);
+		}
+	}
+
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBlueprint);
+
+	// Build response
+	TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
+	Result->SetBoolField(TEXT("success"), true);
+	Result->SetStringField(TEXT("widget_name"), WidgetName);
+	Result->SetStringField(TEXT("widget_class"), Widget->GetClass()->GetName());
+
+	if (PropErrors.Num() > 0)
+	{
+		TArray<TSharedPtr<FJsonValue>> ErrorArray;
+		for (const FString& Err : PropErrors)
+		{
+			ErrorArray.Add(MakeShared<FJsonValueString>(Err));
+		}
+		Result->SetArrayField(TEXT("property_errors"), ErrorArray);
+	}
+
+	return Result;
+}
+
+// ============================================================================
+// remove_widget
+// ============================================================================
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPWidgetCommands::HandleRemoveWidget(const TSharedPtr<FJsonObject>& Params)
+{
+	TSharedPtr<FJsonObject> Error;
+	UWidgetBlueprint* WidgetBlueprint = LoadWidgetBlueprint(Params, Error);
+	if (!WidgetBlueprint)
+	{
+		return Error;
+	}
+
+	if (!Params->HasField(TEXT("widget_name")))
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing required field: widget_name"));
+	}
+
+	const FString WidgetName = Params->GetStringField(TEXT("widget_name"));
+	UWidgetTree* WidgetTree = WidgetBlueprint->WidgetTree;
+	UWidget* Widget = WidgetTree->FindWidget(FName(*WidgetName));
+	if (!Widget)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Widget not found: %s"), *WidgetName));
+	}
+
+	WidgetBlueprint->Modify();
+
+	const FString WidgetClass = Widget->GetClass()->GetName();
+	const bool bWasRoot = (Widget == WidgetTree->RootWidget);
+
+	bool bRemoved = WidgetTree->RemoveWidget(Widget);
+
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBlueprint);
+
+	TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
+	Result->SetBoolField(TEXT("success"), bRemoved);
+	Result->SetStringField(TEXT("widget_name"), WidgetName);
+	Result->SetStringField(TEXT("widget_class"), WidgetClass);
+	Result->SetBoolField(TEXT("was_root"), bWasRoot);
+
+	if (!bRemoved)
+	{
+		Result->SetStringField(TEXT("error"), TEXT("WidgetTree::RemoveWidget returned false"));
+	}
+
+	return Result;
+}
+
+// ============================================================================
+// replace_widget_root
+// ============================================================================
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPWidgetCommands::HandleReplaceWidgetRoot(const TSharedPtr<FJsonObject>& Params)
+{
+	TSharedPtr<FJsonObject> Error;
+	UWidgetBlueprint* WidgetBlueprint = LoadWidgetBlueprint(Params, Error);
+	if (!WidgetBlueprint)
+	{
+		return Error;
+	}
+
+	if (!Params->HasField(TEXT("new_root_class")))
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing required field: new_root_class"));
+	}
+
+	const FString NewRootClassName = Params->GetStringField(TEXT("new_root_class"));
+	const FString NewRootName = Params->HasField(TEXT("new_root_name")) ? Params->GetStringField(TEXT("new_root_name")) : TEXT("");
+	const bool bMigrateChildren = !Params->HasField(TEXT("migrate_children")) || Params->GetBoolField(TEXT("migrate_children"));
+
+	// Resolve new root class
+	UClass* NewRootClass = ResolveWidgetClass(NewRootClassName);
+	if (!NewRootClass || !NewRootClass->IsChildOf(UPanelWidget::StaticClass()))
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("New root class '%s' is not a UPanelWidget subclass"), *NewRootClassName));
+	}
+
+	UWidgetTree* WidgetTree = WidgetBlueprint->WidgetTree;
+
+	WidgetBlueprint->Modify();
+
+	// Construct new root
+	FName RootName = NewRootName.IsEmpty() ? NAME_None : FName(*NewRootName);
+	UWidget* NewRoot = WidgetTree->ConstructWidget<UWidget>(NewRootClass, RootName);
+	if (!NewRoot)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Failed to construct widget of class: %s"), *NewRootClassName));
+	}
+
+	UPanelWidget* NewRootPanel = CastChecked<UPanelWidget>(NewRoot);
+
+	int32 ChildrenMigrated = 0;
+	FString OldRootName = TEXT("(none)");
+	FString OldRootClass = TEXT("(none)");
+
+	// Migrate children from old root if requested
+	UWidget* OldRoot = WidgetTree->RootWidget;
+	if (OldRoot)
+	{
+		OldRootName = OldRoot->GetName();
+		OldRootClass = OldRoot->GetClass()->GetName();
+
+		if (bMigrateChildren)
+		{
+			UPanelWidget* OldPanel = Cast<UPanelWidget>(OldRoot);
+			if (OldPanel)
+			{
+				// Collect children first (modifying while iterating is unsafe)
+				TArray<UWidget*> Children;
+				for (int32 i = 0; i < OldPanel->GetChildrenCount(); ++i)
+				{
+					Children.Add(OldPanel->GetChildAt(i));
+				}
+
+				// Remove from old root and add to new
+				for (UWidget* Child : Children)
+				{
+					OldPanel->RemoveChild(Child);
+					if (NewRootPanel->AddChild(Child))
+					{
+						ChildrenMigrated++;
+					}
+				}
+			}
+		}
+
+		WidgetTree->RemoveWidget(OldRoot);
+	}
+
+	WidgetTree->RootWidget = NewRoot;
+
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBlueprint);
+
+	TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
+	Result->SetBoolField(TEXT("success"), true);
+	Result->SetStringField(TEXT("new_root_name"), NewRoot->GetName());
+	Result->SetStringField(TEXT("new_root_class"), NewRoot->GetClass()->GetName());
+	Result->SetStringField(TEXT("old_root_name"), OldRootName);
+	Result->SetStringField(TEXT("old_root_class"), OldRootClass);
+	Result->SetNumberField(TEXT("children_migrated"), ChildrenMigrated);
+
+	return Result;
+}
+
+// ============================================================================
+// compile_widget_blueprint
+// ============================================================================
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPWidgetCommands::HandleCompileWidgetBlueprint(const TSharedPtr<FJsonObject>& Params)
+{
+	TSharedPtr<FJsonObject> Error;
+	UWidgetBlueprint* WidgetBlueprint = LoadWidgetBlueprint(Params, Error);
+	if (!WidgetBlueprint)
+	{
+		return Error;
+	}
+
+	FKismetEditorUtilities::CompileBlueprint(WidgetBlueprint);
+
+	TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
+	Result->SetBoolField(TEXT("success"), true);
+	Result->SetStringField(TEXT("asset_path"), Params->GetStringField(TEXT("asset_path")));
+	Result->SetBoolField(TEXT("compiled"), true);
 
 	return Result;
 }
@@ -279,7 +877,7 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPWidgetCommands::SerializeWidget(UWidget* W
 	WidgetObj->SetBoolField(TEXT("is_variable"), Widget->bIsVariable);
 
 	// Tool tip (only if non-empty)
-	const FString ToolTipStr = Widget->ToolTipText.ToString();
+	const FString ToolTipStr = Widget->GetToolTipText().ToString();
 	if (!ToolTipStr.IsEmpty())
 	{
 		WidgetObj->SetStringField(TEXT("tool_tip"), ToolTipStr);

@@ -4,8 +4,8 @@
 #include "Json.h"
 
 /**
- * Handler class for DataTable MCP commands.
- * Provides tools to read UDataTable assets and individual rows
+ * Handler class for DataTable and CurveTable MCP commands.
+ * Provides tools to read/update UDataTable and UCurveTable assets
  * via the MCP bridge.
  */
 class UNREALMCP_API FEpicUnrealMCPDataTableCommands
@@ -19,4 +19,7 @@ public:
 private:
 	TSharedPtr<FJsonObject> HandleReadDataTable(const TSharedPtr<FJsonObject>& Params);
 	TSharedPtr<FJsonObject> HandleReadDataTableRow(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleReadCurveTable(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleUpdateCurveTable(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleCreateCurveTable(const TSharedPtr<FJsonObject>& Params);
 };

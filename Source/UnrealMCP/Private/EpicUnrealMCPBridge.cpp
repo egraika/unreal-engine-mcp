@@ -79,12 +79,14 @@ UEpicUnrealMCPBridge::UEpicUnrealMCPBridge()
     MaterialCommands = MakeShared<FEpicUnrealMCPMaterialCommands>();
     RVTCommands = MakeShared<FEpicUnrealMCPRVTCommands>();
     AnimationCommands = MakeShared<FEpicUnrealMCPAnimationCommands>();
+    AnimBlueprintCommands = MakeShared<FEpicUnrealMCPAnimBlueprintCommands>();
     DataAssetCommands = MakeShared<FEpicUnrealMCPDataAssetCommands>();
     DataTableCommands = MakeShared<FEpicUnrealMCPDataTableCommands>();
     MPCCommands = MakeShared<FEpicUnrealMCPMPCCommands>();
     SoundCommands = MakeShared<FEpicUnrealMCPSoundCommands>();
     WidgetCommands = MakeShared<FEpicUnrealMCPWidgetCommands>();
     WorldCommands = MakeShared<FEpicUnrealMCPWorldCommands>();
+    AssetImportCommands = MakeShared<FEpicUnrealMCPAssetImportCommands>();
 }
 
 UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
@@ -96,12 +98,14 @@ UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
     MaterialCommands.Reset();
     RVTCommands.Reset();
     AnimationCommands.Reset();
+    AnimBlueprintCommands.Reset();
     DataAssetCommands.Reset();
     DataTableCommands.Reset();
     MPCCommands.Reset();
     SoundCommands.Reset();
     WidgetCommands.Reset();
     WorldCommands.Reset();
+    AssetImportCommands.Reset();
 }
 
 // Initialize subsystem
@@ -320,19 +324,42 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
             // Animation Commands
             else if (CommandType == TEXT("analyze_anim_montage") ||
                      CommandType == TEXT("analyze_anim_sequence") ||
-                     CommandType == TEXT("list_animation_assets"))
+                     CommandType == TEXT("list_animation_assets") ||
+                     CommandType == TEXT("get_skeletal_mesh_info"))
             {
                 ResultJson = AnimationCommands->HandleCommand(CommandType, Params);
             }
+            // Animation Blueprint Commands
+            else if (CommandType == TEXT("create_anim_blueprint") ||
+                     CommandType == TEXT("read_anim_blueprint") ||
+                     CommandType == TEXT("add_state_machine") ||
+                     CommandType == TEXT("add_state") ||
+                     CommandType == TEXT("add_transition") ||
+                     CommandType == TEXT("set_default_state") ||
+                     CommandType == TEXT("set_state_animation") ||
+                     CommandType == TEXT("set_transition_rule") ||
+                     CommandType == TEXT("add_blend_space_player") ||
+                     CommandType == TEXT("connect_anim_nodes") ||
+                     CommandType == TEXT("get_state_machine_info") ||
+                     CommandType == TEXT("add_anim_node"))
+            {
+                ResultJson = AnimBlueprintCommands->HandleCommand(CommandType, Params);
+            }
             // Data Asset Commands
             else if (CommandType == TEXT("read_data_asset") ||
-                     CommandType == TEXT("list_data_assets"))
+                     CommandType == TEXT("list_data_assets") ||
+                     CommandType == TEXT("update_data_asset") ||
+                     CommandType == TEXT("create_data_asset") ||
+                     CommandType == TEXT("populate_athena_preset"))
             {
                 ResultJson = DataAssetCommands->HandleCommand(CommandType, Params);
             }
-            // Data Table Commands
+            // Data Table / Curve Table Commands
             else if (CommandType == TEXT("read_data_table") ||
-                     CommandType == TEXT("read_data_table_row"))
+                     CommandType == TEXT("read_data_table_row") ||
+                     CommandType == TEXT("read_curve_table") ||
+                     CommandType == TEXT("update_curve_table") ||
+                     CommandType == TEXT("create_curve_table"))
             {
                 ResultJson = DataTableCommands->HandleCommand(CommandType, Params);
             }
@@ -349,7 +376,13 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
             }
             // Widget Commands
             else if (CommandType == TEXT("analyze_widget_blueprint") ||
-                     CommandType == TEXT("get_widget_details"))
+                     CommandType == TEXT("get_widget_details") ||
+                     CommandType == TEXT("create_widget_blueprint") ||
+                     CommandType == TEXT("add_widget_child") ||
+                     CommandType == TEXT("set_widget_properties") ||
+                     CommandType == TEXT("remove_widget") ||
+                     CommandType == TEXT("replace_widget_root") ||
+                     CommandType == TEXT("compile_widget_blueprint"))
             {
                 ResultJson = WidgetCommands->HandleCommand(CommandType, Params);
             }
@@ -358,6 +391,11 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
                      CommandType == TEXT("get_level_details"))
             {
                 ResultJson = WorldCommands->HandleCommand(CommandType, Params);
+            }
+            // Asset Import Commands
+            else if (CommandType == TEXT("import_fbx"))
+            {
+                ResultJson = AssetImportCommands->HandleCommand(CommandType, Params);
             }
             else
             {

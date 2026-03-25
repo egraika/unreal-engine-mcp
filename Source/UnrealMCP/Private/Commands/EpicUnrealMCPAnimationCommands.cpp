@@ -8,6 +8,9 @@
 #include "Animation/BlendSpace.h"
 #include "Animation/AnimationAsset.h"
 #include "Animation/AnimNotifies/AnimNotifyState.h"
+#include "Engine/SkeletalMesh.h"
+#include "Engine/SkeletalMeshSocket.h"
+#include "Animation/Skeleton.h"
 
 FEpicUnrealMCPAnimationCommands::FEpicUnrealMCPAnimationCommands()
 {
@@ -30,6 +33,10 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPAnimationCommands::HandleCommand(const FSt
 	else if (CommandType == TEXT("list_animation_assets"))
 	{
 		return HandleListAnimationAssets(Params);
+	}
+	else if (CommandType == TEXT("get_skeletal_mesh_info"))
+	{
+		return HandleGetSkeletalMeshInfo(Params);
 	}
 
 	return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Unknown Animation command: %s"), *CommandType));
@@ -302,6 +309,122 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPAnimationCommands::HandleListAnimationAsse
 	Result->SetNumberField(TEXT("total_found"), TotalFound);
 	Result->SetNumberField(TEXT("returned"), Count);
 	Result->SetArrayField(TEXT("assets"), AssetsArray);
+
+	return Result;
+}
+
+// ============================================================================
+// get_skeletal_mesh_info
+// ============================================================================
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPAnimationCommands::HandleGetSkeletalMeshInfo(const TSharedPtr<FJsonObject>& Params)
+{
+	if (!Params->HasField(TEXT("asset_path")))
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing required field: asset_path"));
+	}
+
+	const FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+	const bool bIncludeBones = !Params->HasField(TEXT("include_bones")) || Params->GetBoolField(TEXT("include_bones"));
+
+	UObject* LoadedAsset = UEditorAssetLibrary::LoadAsset(AssetPath);
+	if (!LoadedAsset)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Failed to load asset: %s"), *AssetPath));
+	}
+
+	USkeletalMesh* SkelMesh = Cast<USkeletalMesh>(LoadedAsset);
+	if (!SkelMesh)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Asset is not a USkeletalMesh: %s (is %s)"), *AssetPath, *LoadedAsset->GetClass()->GetName()));
+	}
+
+	TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
+	Result->SetBoolField(TEXT("success"), true);
+	Result->SetStringField(TEXT("asset_path"), AssetPath);
+	Result->SetStringField(TEXT("asset_name"), SkelMesh->GetName());
+
+	// Skeleton reference
+	USkeleton* Skeleton = SkelMesh->GetSkeleton();
+	if (Skeleton)
+	{
+		Result->SetStringField(TEXT("skeleton"), Skeleton->GetPathName());
+	}
+
+	// Reference skeleton for bone data
+	const FReferenceSkeleton& RefSkeleton = SkelMesh->GetRefSkeleton();
+	const int32 NumBones = RefSkeleton.GetNum();
+	Result->SetNumberField(TEXT("num_bones"), NumBones);
+
+	// LODs
+	Result->SetNumberField(TEXT("num_lods"), SkelMesh->GetLODNum());
+
+	// Materials
+	const TArray<FSkeletalMaterial>& Materials = SkelMesh->GetMaterials();
+	Result->SetNumberField(TEXT("num_materials"), Materials.Num());
+
+	TArray<TSharedPtr<FJsonValue>> MaterialsArray;
+	for (const FSkeletalMaterial& Mat : Materials)
+	{
+		TSharedPtr<FJsonObject> MatObj = MakeShareable(new FJsonObject);
+		MatObj->SetStringField(TEXT("slot_name"), Mat.MaterialSlotName.ToString());
+		MatObj->SetStringField(TEXT("material"), Mat.MaterialInterface ? Mat.MaterialInterface->GetPathName() : TEXT("None"));
+		MaterialsArray.Add(MakeShareable(new FJsonValueObject(MatObj)));
+	}
+	Result->SetArrayField(TEXT("materials"), MaterialsArray);
+
+	// Sockets (combined mesh + skeleton sockets, no duplicates)
+	TArray<USkeletalMeshSocket*> ActiveSockets = SkelMesh->GetActiveSocketList();
+	Result->SetNumberField(TEXT("num_sockets"), ActiveSockets.Num());
+
+	TArray<TSharedPtr<FJsonValue>> SocketsArray;
+	for (const USkeletalMeshSocket* Socket : ActiveSockets)
+	{
+		if (!Socket)
+		{
+			continue;
+		}
+
+		TSharedPtr<FJsonObject> SocketObj = MakeShareable(new FJsonObject);
+		SocketObj->SetStringField(TEXT("name"), Socket->SocketName.ToString());
+		SocketObj->SetStringField(TEXT("bone"), Socket->BoneName.ToString());
+
+		TSharedPtr<FJsonObject> LocObj = MakeShareable(new FJsonObject);
+		LocObj->SetNumberField(TEXT("x"), Socket->RelativeLocation.X);
+		LocObj->SetNumberField(TEXT("y"), Socket->RelativeLocation.Y);
+		LocObj->SetNumberField(TEXT("z"), Socket->RelativeLocation.Z);
+		SocketObj->SetObjectField(TEXT("location"), LocObj);
+
+		TSharedPtr<FJsonObject> RotObj = MakeShareable(new FJsonObject);
+		RotObj->SetNumberField(TEXT("pitch"), Socket->RelativeRotation.Pitch);
+		RotObj->SetNumberField(TEXT("yaw"), Socket->RelativeRotation.Yaw);
+		RotObj->SetNumberField(TEXT("roll"), Socket->RelativeRotation.Roll);
+		SocketObj->SetObjectField(TEXT("rotation"), RotObj);
+
+		TSharedPtr<FJsonObject> ScaleObj = MakeShareable(new FJsonObject);
+		ScaleObj->SetNumberField(TEXT("x"), Socket->RelativeScale.X);
+		ScaleObj->SetNumberField(TEXT("y"), Socket->RelativeScale.Y);
+		ScaleObj->SetNumberField(TEXT("z"), Socket->RelativeScale.Z);
+		SocketObj->SetObjectField(TEXT("scale"), ScaleObj);
+
+		SocketsArray.Add(MakeShareable(new FJsonValueObject(SocketObj)));
+	}
+	Result->SetArrayField(TEXT("sockets"), SocketsArray);
+
+	// Bones
+	if (bIncludeBones)
+	{
+		TArray<TSharedPtr<FJsonValue>> BonesArray;
+		for (int32 i = 0; i < NumBones; ++i)
+		{
+			TSharedPtr<FJsonObject> BoneObj = MakeShareable(new FJsonObject);
+			BoneObj->SetNumberField(TEXT("index"), i);
+			BoneObj->SetStringField(TEXT("name"), RefSkeleton.GetBoneName(i).ToString());
+			BoneObj->SetNumberField(TEXT("parent_index"), RefSkeleton.GetParentIndex(i));
+			BonesArray.Add(MakeShareable(new FJsonValueObject(BoneObj)));
+		}
+		Result->SetArrayField(TEXT("bones"), BonesArray);
+	}
 
 	return Result;
 }
