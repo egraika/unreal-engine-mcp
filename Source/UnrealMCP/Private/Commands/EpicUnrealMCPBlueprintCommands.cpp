@@ -1696,42 +1696,7 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleGetMaterialInstan
 		ResultObj->SetStringField(TEXT("parent_material"), MatInstance->Parent->GetPathName());
 	}
 
-	// --- Parse optional filters ---
-	bool bOverriddenOnly = false;
-	Params->TryGetBoolField(TEXT("overridden_only"), bOverriddenOnly);
-
-	bool bIncludeMetadata = true;
-	Params->TryGetBoolField(TEXT("include_metadata"), bIncludeMetadata);
-
-	FString NameFilter;
-	Params->TryGetStringField(TEXT("name_filter"), NameFilter);
-
-	TSet<FString> RequestedTypes;
-	const TArray<TSharedPtr<FJsonValue>>* TypesArray;
-	if (Params->TryGetArrayField(TEXT("parameter_types"), TypesArray))
-	{
-		for (const auto& TypeVal : *TypesArray)
-		{
-			FString TypeStr;
-			if (TypeVal->TryGetString(TypeStr))
-			{
-				RequestedTypes.Add(TypeStr.ToLower());
-			}
-		}
-	}
-
-	auto ShouldIncludeType = [&RequestedTypes](const TCHAR* Type) -> bool
-	{
-		return RequestedTypes.Num() == 0 || RequestedTypes.Contains(FString(Type).ToLower());
-	};
-
-	auto PassesNameFilter = [&NameFilter](const FString& ParamName) -> bool
-	{
-		return NameFilter.IsEmpty() || ParamName.Contains(NameFilter);
-	};
-
 	// --- Scalar Parameters ---
-	if (ShouldIncludeType(TEXT("scalar")))
 	{
 		TArray<FMaterialParameterInfo> ParamInfos;
 		TArray<FGuid> ParamGuids;
@@ -1740,9 +1705,15 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleGetMaterialInstan
 		TArray<TSharedPtr<FJsonValue>> ScalarArray;
 		for (int32 i = 0; i < ParamInfos.Num(); i++)
 		{
-			const FString ParamName = ParamInfos[i].Name.ToString();
-			if (!PassesNameFilter(ParamName)) continue;
+			float Value = 0.f;
+			MatInstance->GetScalarParameterValue(ParamInfos[i], Value, true);
 
+			TSharedPtr<FJsonObject> ParamObj = MakeShared<FJsonObject>();
+			ParamObj->SetStringField(TEXT("name"), ParamInfos[i].Name.ToString());
+			ParamObj->SetStringField(TEXT("group"), ParamInfos[i].Association == EMaterialParameterAssociation::GlobalParameter ? TEXT("Global") : TEXT("Layer"));
+			ParamObj->SetNumberField(TEXT("value"), Value);
+
+			// Check if overridden in this instance
 			bool bHasOverride = false;
 			for (const FScalarParameterValue& SPV : MatInstance->ScalarParameterValues)
 			{
@@ -1752,38 +1723,7 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleGetMaterialInstan
 					break;
 				}
 			}
-			if (bOverriddenOnly && !bHasOverride) continue;
-
-			float Value = 0.f;
-			MatInstance->GetScalarParameterValue(ParamInfos[i], Value, true);
-
-			TSharedPtr<FJsonObject> ParamObj = MakeShared<FJsonObject>();
-			ParamObj->SetStringField(TEXT("name"), ParamName);
-			ParamObj->SetStringField(TEXT("group"), ParamInfos[i].Association == EMaterialParameterAssociation::GlobalParameter ? TEXT("Global") : TEXT("Layer"));
-			ParamObj->SetNumberField(TEXT("value"), Value);
 			ParamObj->SetBoolField(TEXT("overridden"), bHasOverride);
-
-#if WITH_EDITOR
-			if (bIncludeMetadata)
-			{
-				FName GroupName;
-				if (MatInstance->GetGroupName(ParamInfos[i], GroupName))
-				{
-					ParamObj->SetStringField(TEXT("group_name"), GroupName.ToString());
-				}
-				FString Desc;
-				if (MatInstance->GetParameterDesc(ParamInfos[i], Desc) && !Desc.IsEmpty())
-				{
-					ParamObj->SetStringField(TEXT("description"), Desc);
-				}
-				float SliderMin = 0.f, SliderMax = 0.f;
-				if (MatInstance->GetScalarParameterSliderMinMax(ParamInfos[i], SliderMin, SliderMax))
-				{
-					ParamObj->SetNumberField(TEXT("min"), SliderMin);
-					ParamObj->SetNumberField(TEXT("max"), SliderMax);
-				}
-			}
-#endif
 
 			ScalarArray.Add(MakeShared<FJsonValueObject>(ParamObj));
 		}
@@ -1791,7 +1731,6 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleGetMaterialInstan
 	}
 
 	// --- Vector Parameters ---
-	if (ShouldIncludeType(TEXT("vector")))
 	{
 		TArray<FMaterialParameterInfo> ParamInfos;
 		TArray<FGuid> ParamGuids;
@@ -1800,8 +1739,19 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleGetMaterialInstan
 		TArray<TSharedPtr<FJsonValue>> VectorArray;
 		for (int32 i = 0; i < ParamInfos.Num(); i++)
 		{
-			const FString ParamName = ParamInfos[i].Name.ToString();
-			if (!PassesNameFilter(ParamName)) continue;
+			FLinearColor Value = FLinearColor::Black;
+			MatInstance->GetVectorParameterValue(ParamInfos[i], Value, true);
+
+			TSharedPtr<FJsonObject> ParamObj = MakeShared<FJsonObject>();
+			ParamObj->SetStringField(TEXT("name"), ParamInfos[i].Name.ToString());
+			ParamObj->SetStringField(TEXT("group"), ParamInfos[i].Association == EMaterialParameterAssociation::GlobalParameter ? TEXT("Global") : TEXT("Layer"));
+
+			TArray<TSharedPtr<FJsonValue>> ColorValues;
+			ColorValues.Add(MakeShared<FJsonValueNumber>(Value.R));
+			ColorValues.Add(MakeShared<FJsonValueNumber>(Value.G));
+			ColorValues.Add(MakeShared<FJsonValueNumber>(Value.B));
+			ColorValues.Add(MakeShared<FJsonValueNumber>(Value.A));
+			ParamObj->SetArrayField(TEXT("value"), ColorValues);
 
 			bool bHasOverride = false;
 			for (const FVectorParameterValue& VPV : MatInstance->VectorParameterValues)
@@ -1812,38 +1762,7 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleGetMaterialInstan
 					break;
 				}
 			}
-			if (bOverriddenOnly && !bHasOverride) continue;
-
-			FLinearColor Value = FLinearColor::Black;
-			MatInstance->GetVectorParameterValue(ParamInfos[i], Value, true);
-
-			TSharedPtr<FJsonObject> ParamObj = MakeShared<FJsonObject>();
-			ParamObj->SetStringField(TEXT("name"), ParamName);
-			ParamObj->SetStringField(TEXT("group"), ParamInfos[i].Association == EMaterialParameterAssociation::GlobalParameter ? TEXT("Global") : TEXT("Layer"));
-
-			TArray<TSharedPtr<FJsonValue>> ColorValues;
-			ColorValues.Add(MakeShared<FJsonValueNumber>(Value.R));
-			ColorValues.Add(MakeShared<FJsonValueNumber>(Value.G));
-			ColorValues.Add(MakeShared<FJsonValueNumber>(Value.B));
-			ColorValues.Add(MakeShared<FJsonValueNumber>(Value.A));
-			ParamObj->SetArrayField(TEXT("value"), ColorValues);
 			ParamObj->SetBoolField(TEXT("overridden"), bHasOverride);
-
-#if WITH_EDITOR
-			if (bIncludeMetadata)
-			{
-				FName GroupName;
-				if (MatInstance->GetGroupName(ParamInfos[i], GroupName))
-				{
-					ParamObj->SetStringField(TEXT("group_name"), GroupName.ToString());
-				}
-				FString Desc;
-				if (MatInstance->GetParameterDesc(ParamInfos[i], Desc) && !Desc.IsEmpty())
-				{
-					ParamObj->SetStringField(TEXT("description"), Desc);
-				}
-			}
-#endif
 
 			VectorArray.Add(MakeShared<FJsonValueObject>(ParamObj));
 		}
@@ -1851,7 +1770,6 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleGetMaterialInstan
 	}
 
 	// --- Texture Parameters ---
-	if (ShouldIncludeType(TEXT("texture")))
 	{
 		TArray<FMaterialParameterInfo> ParamInfos;
 		TArray<FGuid> ParamGuids;
@@ -1860,8 +1778,13 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleGetMaterialInstan
 		TArray<TSharedPtr<FJsonValue>> TextureArray;
 		for (int32 i = 0; i < ParamInfos.Num(); i++)
 		{
-			const FString ParamName = ParamInfos[i].Name.ToString();
-			if (!PassesNameFilter(ParamName)) continue;
+			UTexture* TexValue = nullptr;
+			MatInstance->GetTextureParameterValue(ParamInfos[i], TexValue, true);
+
+			TSharedPtr<FJsonObject> ParamObj = MakeShared<FJsonObject>();
+			ParamObj->SetStringField(TEXT("name"), ParamInfos[i].Name.ToString());
+			ParamObj->SetStringField(TEXT("group"), ParamInfos[i].Association == EMaterialParameterAssociation::GlobalParameter ? TEXT("Global") : TEXT("Layer"));
+			ParamObj->SetStringField(TEXT("value"), TexValue ? TexValue->GetPathName() : TEXT("None"));
 
 			bool bHasOverride = false;
 			for (const FTextureParameterValue& TPV : MatInstance->TextureParameterValues)
@@ -1872,32 +1795,7 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleGetMaterialInstan
 					break;
 				}
 			}
-			if (bOverriddenOnly && !bHasOverride) continue;
-
-			UTexture* TexValue = nullptr;
-			MatInstance->GetTextureParameterValue(ParamInfos[i], TexValue, true);
-
-			TSharedPtr<FJsonObject> ParamObj = MakeShared<FJsonObject>();
-			ParamObj->SetStringField(TEXT("name"), ParamName);
-			ParamObj->SetStringField(TEXT("group"), ParamInfos[i].Association == EMaterialParameterAssociation::GlobalParameter ? TEXT("Global") : TEXT("Layer"));
-			ParamObj->SetStringField(TEXT("value"), TexValue ? TexValue->GetPathName() : TEXT("None"));
 			ParamObj->SetBoolField(TEXT("overridden"), bHasOverride);
-
-#if WITH_EDITOR
-			if (bIncludeMetadata)
-			{
-				FName GroupName;
-				if (MatInstance->GetGroupName(ParamInfos[i], GroupName))
-				{
-					ParamObj->SetStringField(TEXT("group_name"), GroupName.ToString());
-				}
-				FString Desc;
-				if (MatInstance->GetParameterDesc(ParamInfos[i], Desc) && !Desc.IsEmpty())
-				{
-					ParamObj->SetStringField(TEXT("description"), Desc);
-				}
-			}
-#endif
 
 			TextureArray.Add(MakeShared<FJsonValueObject>(ParamObj));
 		}
@@ -1905,103 +1803,31 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleGetMaterialInstan
 	}
 
 	// --- Static Switch Parameters (MIC only) ---
-	if (ShouldIncludeType(TEXT("static_switch")))
 	{
 		UMaterialInstanceConstant* MIC = Cast<UMaterialInstanceConstant>(MatInstance);
 		if (MIC)
 		{
-			const FStaticParameterSet& StaticParams = MIC->GetStaticParameters();
-
 			TArray<TSharedPtr<FJsonValue>> SwitchArray;
-#if WITH_EDITORONLY_DATA
-			// Discover ALL static switches in parent chain (including inherited/default)
-			{
-				TArray<FMaterialParameterInfo> SwitchParamInfos;
-				TArray<FGuid> SwitchParamGuids;
-				MIC->GetAllStaticSwitchParameterInfo(SwitchParamInfos, SwitchParamGuids);
 
-				for (int32 i = 0; i < SwitchParamInfos.Num(); i++)
-				{
-					const FString ParamName = SwitchParamInfos[i].Name.ToString();
-					if (!PassesNameFilter(ParamName)) continue;
-
-					// Check if overridden in this instance
-					bool bIsOverridden = false;
-					for (const FStaticSwitchParameter& SP : StaticParams.StaticSwitchParameters)
-					{
-						if (SP.ParameterInfo.Name == SwitchParamInfos[i].Name && SP.bOverride)
-						{
-							bIsOverridden = true;
-							break;
-						}
-					}
-					if (bOverriddenOnly && !bIsOverridden) continue;
-
-					TSharedPtr<FJsonObject> ParamObj = MakeShared<FJsonObject>();
-					ParamObj->SetStringField(TEXT("name"), ParamName);
-
-					// Get effective value (resolves through parent chain)
-					bool bSwitchValue = false;
-					FGuid ExpressionGuid;
-					MIC->GetStaticSwitchParameterValue(SwitchParamInfos[i], bSwitchValue, ExpressionGuid);
-					ParamObj->SetBoolField(TEXT("value"), bSwitchValue);
-					ParamObj->SetBoolField(TEXT("overridden"), bIsOverridden);
-
-#if WITH_EDITOR
-					if (bIncludeMetadata)
-					{
-						FName GroupName;
-						if (MIC->GetGroupName(SwitchParamInfos[i], GroupName))
-						{
-							ParamObj->SetStringField(TEXT("group_name"), GroupName.ToString());
-						}
-						FString Desc;
-						if (MIC->GetParameterDesc(SwitchParamInfos[i], Desc) && !Desc.IsEmpty())
-						{
-							ParamObj->SetStringField(TEXT("description"), Desc);
-						}
-					}
-#endif
-
-					SwitchArray.Add(MakeShared<FJsonValueObject>(ParamObj));
-				}
-			}
-#else
-			// Fallback: only overridden switches visible without editor data
+			// In UE5.7, StaticSwitchParameters live on FStaticParameterSetRuntimeData (base of FStaticParameterSet)
+			const FStaticParameterSet& StaticParams = MIC->GetStaticParameters();
 			for (const FStaticSwitchParameter& SwitchParam : StaticParams.StaticSwitchParameters)
 			{
-				const FString ParamName = SwitchParam.ParameterInfo.Name.ToString();
-				if (!PassesNameFilter(ParamName)) continue;
-				if (bOverriddenOnly && !SwitchParam.bOverride) continue;
-
 				TSharedPtr<FJsonObject> ParamObj = MakeShared<FJsonObject>();
-				ParamObj->SetStringField(TEXT("name"), ParamName);
+				ParamObj->SetStringField(TEXT("name"), SwitchParam.ParameterInfo.Name.ToString());
 				ParamObj->SetBoolField(TEXT("value"), SwitchParam.Value);
 				ParamObj->SetBoolField(TEXT("overridden"), SwitchParam.bOverride);
 				SwitchArray.Add(MakeShared<FJsonValueObject>(ParamObj));
 			}
-#endif
 			ResultObj->SetArrayField(TEXT("static_switch_parameters"), SwitchArray);
-		}
-	}
 
-	// --- Static Component Mask Parameters (MIC only, editor-only) ---
 #if WITH_EDITORONLY_DATA
-	if (ShouldIncludeType(TEXT("static_component_mask")))
-	{
-		UMaterialInstanceConstant* MIC = Cast<UMaterialInstanceConstant>(MatInstance);
-		if (MIC)
-		{
-			const FStaticParameterSet& StaticParams = MIC->GetStaticParameters();
+			// Static Component Mask Parameters are editor-only
 			TArray<TSharedPtr<FJsonValue>> MaskArray;
 			for (const FStaticComponentMaskParameter& MaskParam : StaticParams.EditorOnly.StaticComponentMaskParameters)
 			{
-				const FString ParamName = MaskParam.ParameterInfo.Name.ToString();
-				if (!PassesNameFilter(ParamName)) continue;
-				if (bOverriddenOnly && !MaskParam.bOverride) continue;
-
 				TSharedPtr<FJsonObject> ParamObj = MakeShared<FJsonObject>();
-				ParamObj->SetStringField(TEXT("name"), ParamName);
+				ParamObj->SetStringField(TEXT("name"), MaskParam.ParameterInfo.Name.ToString());
 				ParamObj->SetBoolField(TEXT("r"), MaskParam.R);
 				ParamObj->SetBoolField(TEXT("g"), MaskParam.G);
 				ParamObj->SetBoolField(TEXT("b"), MaskParam.B);
@@ -2010,12 +1836,11 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleGetMaterialInstan
 				MaskArray.Add(MakeShared<FJsonValueObject>(ParamObj));
 			}
 			ResultObj->SetArrayField(TEXT("static_component_mask_parameters"), MaskArray);
+#endif
 		}
 	}
-#endif
 
 	// --- Runtime Virtual Texture Parameters ---
-	if (ShouldIncludeType(TEXT("runtime_virtual_texture")))
 	{
 		TArray<FMaterialParameterInfo> ParamInfos;
 		TArray<FGuid> ParamGuids;
@@ -2024,14 +1849,11 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleGetMaterialInstan
 		TArray<TSharedPtr<FJsonValue>> RVTArray;
 		for (int32 i = 0; i < ParamInfos.Num(); i++)
 		{
-			const FString ParamName = ParamInfos[i].Name.ToString();
-			if (!PassesNameFilter(ParamName)) continue;
-
 			URuntimeVirtualTexture* RVTValue = nullptr;
 			MatInstance->GetRuntimeVirtualTextureParameterValue(ParamInfos[i], RVTValue, true);
 
 			TSharedPtr<FJsonObject> ParamObj = MakeShared<FJsonObject>();
-			ParamObj->SetStringField(TEXT("name"), ParamName);
+			ParamObj->SetStringField(TEXT("name"), ParamInfos[i].Name.ToString());
 			ParamObj->SetStringField(TEXT("value"), RVTValue ? RVTValue->GetPathName() : TEXT("None"));
 			RVTArray.Add(MakeShared<FJsonValueObject>(ParamObj));
 		}

@@ -20,5 +20,4 @@ private:
 	TSharedPtr<FJsonObject> HandleAnalyzeAnimMontage(const TSharedPtr<FJsonObject>& Params);
 	TSharedPtr<FJsonObject> HandleAnalyzeAnimSequence(const TSharedPtr<FJsonObject>& Params);
 	TSharedPtr<FJsonObject> HandleListAnimationAssets(const TSharedPtr<FJsonObject>& Params);
-	TSharedPtr<FJsonObject> HandleGetSkeletalMeshInfo(const TSharedPtr<FJsonObject>& Params);
 };

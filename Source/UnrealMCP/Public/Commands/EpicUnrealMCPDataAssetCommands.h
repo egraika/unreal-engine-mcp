@@ -19,7 +19,4 @@ public:
 private:
 	TSharedPtr<FJsonObject> HandleReadDataAsset(const TSharedPtr<FJsonObject>& Params);
 	TSharedPtr<FJsonObject> HandleListDataAssets(const TSharedPtr<FJsonObject>& Params);
-	TSharedPtr<FJsonObject> HandleUpdateDataAsset(const TSharedPtr<FJsonObject>& Params);
-	TSharedPtr<FJsonObject> HandleCreateDataAsset(const TSharedPtr<FJsonObject>& Params);
-	TSharedPtr<FJsonObject> HandlePopulateAthenaPreset(const TSharedPtr<FJsonObject>& Params);
 };
