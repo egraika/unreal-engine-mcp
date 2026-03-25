@@ -2988,6 +2988,107 @@ def clear_socket_preview(actor_name: str = "") -> Dict[str, Any]:
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def capture_socket_preview(
+    skeleton_path: str,
+    socket_name: str,
+    mesh_path: str,
+    resolution: int = 512
+) -> Dict[str, Any]:
+    """Capture a screenshot of a mesh attached to a socket on a skeleton's preview mesh.
+
+    Spawns the skeleton's preview mannequin, attaches the given mesh to the socket,
+    renders a screenshot from a camera looking at the socket area, and returns the
+    file path to the saved PNG image.
+
+    Args:
+        skeleton_path: Path to skeleton or skeletal mesh asset
+        socket_name: Socket to attach the preview mesh to
+        mesh_path: Asset path to the static/skeletal mesh to preview
+        resolution: Screenshot resolution in pixels (default 512)
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("capture_socket_preview", {
+            "skeleton_path": skeleton_path,
+            "socket_name": socket_name,
+            "mesh_path": mesh_path,
+            "resolution": resolution
+        })
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"capture_socket_preview error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+# ============================================================
+# Widget Blueprint Tools
+# ============================================================
+
+@mcp.tool()
+def analyze_widget_blueprint(
+    asset_path: str
+) -> Dict[str, Any]:
+    """Analyze a Widget Blueprint (UMG) and return its full hierarchy, bindings, and properties.
+
+    Returns the widget tree structure including:
+    - All child widgets with their types, names, and hierarchy
+    - BindWidget/BindWidgetOptional property bindings
+    - Slot properties (anchors, alignment, padding, size)
+    - Visibility, render opacity, and interactability settings
+
+    Args:
+        asset_path: Content path to the Widget Blueprint (e.g., "/Game/PRK/UI/Widgets/Dialogue/DialogueWidget_WB")
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("analyze_widget_blueprint", {
+            "asset_path": asset_path
+        })
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"analyze_widget_blueprint error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def get_widget_details(
+    asset_path: str,
+    widget_name: str = ""
+) -> Dict[str, Any]:
+    """Get detailed properties of a specific widget within a Widget Blueprint.
+
+    If widget_name is empty, returns details of the root widget.
+    Otherwise, searches the hierarchy for the named widget.
+
+    Returns detailed properties including:
+    - Widget class and type
+    - All UPROPERTY values (text, color, font, brush, etc.)
+    - Layout properties (anchors, alignment, offsets)
+    - Binding information (BindWidget connections)
+
+    Args:
+        asset_path: Content path to the Widget Blueprint
+        widget_name: Name of the specific widget to inspect (empty = root)
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {"asset_path": asset_path}
+        if widget_name:
+            params["widget_name"] = widget_name
+        response = unreal.send_command("get_widget_details", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"get_widget_details error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")
