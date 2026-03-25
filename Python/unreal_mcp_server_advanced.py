@@ -3090,6 +3090,188 @@ def get_widget_details(
 
 
 @mcp.tool()
+def add_widget_child(
+    asset_path: str,
+    widget_type: str,
+    widget_name: str,
+    parent_name: str = "",
+    text: str = "",
+    visibility: str = "Visible",
+    position_x: float = 0,
+    position_y: float = 0,
+    size_x: float = 100,
+    size_y: float = 50,
+    anchor_min_x: float = 0,
+    anchor_min_y: float = 0,
+    anchor_max_x: float = -1,
+    anchor_max_y: float = -1,
+    alignment_x: float = 0,
+    alignment_y: float = 0,
+    auto_size: bool = False,
+    z_order: int = 0
+) -> Dict[str, Any]:
+    """Add a child widget to a Widget Blueprint (UMG).
+
+    Supports: TextBlock, Image, Button, CanvasPanel, VerticalBox, HorizontalBox,
+    Overlay, Border, ProgressBar, Spacer, SizeBox, CheckBox, Slider, ScrollBox,
+    WidgetSwitcher, RichTextBlock.
+
+    Args:
+        asset_path: Path to the Widget Blueprint (e.g., "/Game/PRK/UI/Widgets/MyWidget")
+        widget_type: Type of widget to add (e.g., "TextBlock", "Image", "Button")
+        widget_name: Name for the new widget (must be unique in the tree)
+        parent_name: Name of parent widget to add to (empty = root panel)
+        text: Initial text for TextBlock widgets
+        visibility: Visibility state (Visible, Collapsed, Hidden, HitTestInvisible, SelfHitTestInvisible)
+        position_x: X position (for canvas panel children)
+        position_y: Y position (for canvas panel children)
+        size_x: Width (for canvas panel children)
+        size_y: Height (for canvas panel children)
+        anchor_min_x: Anchor minimum X (0-1)
+        anchor_min_y: Anchor minimum Y (0-1)
+        anchor_max_x: Anchor maximum X (-1 = same as min, for point anchor)
+        anchor_max_y: Anchor maximum Y (-1 = same as min, for point anchor)
+        alignment_x: Pivot X (0-1)
+        alignment_y: Pivot Y (0-1)
+        auto_size: Size to content
+        z_order: Z-order for canvas panel children
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {
+            "asset_path": asset_path,
+            "widget_type": widget_type,
+            "widget_name": widget_name,
+            "visibility": visibility,
+        }
+        if parent_name:
+            params["parent_name"] = parent_name
+        if text:
+            params["text"] = text
+        if position_x != 0 or position_y != 0:
+            params["position"] = {"x": position_x, "y": position_y}
+        if size_x != 100 or size_y != 50:
+            params["size"] = {"x": size_x, "y": size_y}
+        if anchor_min_x != 0 or anchor_min_y != 0 or anchor_max_x != -1 or anchor_max_y != -1:
+            anchors = {"min_x": anchor_min_x, "min_y": anchor_min_y}
+            if anchor_max_x >= 0:
+                anchors["max_x"] = anchor_max_x
+            if anchor_max_y >= 0:
+                anchors["max_y"] = anchor_max_y
+            params["anchors"] = anchors
+        if alignment_x != 0 or alignment_y != 0:
+            params["alignment"] = {"x": alignment_x, "y": alignment_y}
+        if auto_size:
+            params["auto_size"] = True
+        if z_order != 0:
+            params["z_order"] = z_order
+
+        response = unreal.send_command("add_widget_child", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"add_widget_child error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def set_widget_property(
+    asset_path: str,
+    widget_name: str,
+    text: str = "",
+    visibility: str = "",
+    render_opacity: float = -1,
+    is_enabled: bool = True,
+    color_r: float = -1,
+    color_g: float = -1,
+    color_b: float = -1,
+    color_a: float = 1.0,
+    texture: str = "",
+    auto_wrap: bool = False,
+    percent: float = -1
+) -> Dict[str, Any]:
+    """Modify properties on an existing widget in a Widget Blueprint.
+
+    Supports common properties on all widgets (visibility, opacity, enabled)
+    plus type-specific properties (text for TextBlock, color for Image, etc.).
+
+    Args:
+        asset_path: Path to the Widget Blueprint
+        widget_name: Name of the widget to modify
+        text: Set text (TextBlock only)
+        visibility: Set visibility (Visible, Collapsed, Hidden, HitTestInvisible, SelfHitTestInvisible)
+        render_opacity: Set render opacity (0.0 - 1.0, -1 = don't change)
+        is_enabled: Set enabled state
+        color_r: Color red channel (0-1, -1 = don't set color)
+        color_g: Color green channel (0-1)
+        color_b: Color blue channel (0-1)
+        color_a: Color alpha channel (0-1)
+        texture: Texture asset path (Image only)
+        auto_wrap: Enable auto text wrapping (TextBlock only)
+        percent: Set progress percent 0-1 (ProgressBar only)
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {
+            "asset_path": asset_path,
+            "widget_name": widget_name,
+        }
+        if text:
+            params["text"] = text
+        if visibility:
+            params["visibility"] = visibility
+        if render_opacity >= 0:
+            params["render_opacity"] = render_opacity
+        if not is_enabled:
+            params["is_enabled"] = False
+        if color_r >= 0:
+            params["color"] = {"r": color_r, "g": color_g, "b": color_b, "a": color_a}
+        if texture:
+            params["texture"] = texture
+        if auto_wrap:
+            params["auto_wrap"] = True
+        if percent >= 0:
+            params["percent"] = percent
+
+        response = unreal.send_command("set_widget_property", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"set_widget_property error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def remove_widget(
+    asset_path: str,
+    widget_name: str
+) -> Dict[str, Any]:
+    """Remove a widget from a Widget Blueprint.
+
+    Removes the named widget and all its children from the widget tree.
+    The blueprint is recompiled after removal.
+
+    Args:
+        asset_path: Path to the Widget Blueprint
+        widget_name: Name of the widget to remove
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("remove_widget", {
+            "asset_path": asset_path,
+            "widget_name": widget_name
+        })
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"remove_widget error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
 def create_widget_blueprint(
     name: str,
     path: str = "/Game/Blueprints/Widgets",

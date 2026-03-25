@@ -20,5 +20,8 @@ private:
 	TSharedPtr<FJsonObject> HandleAnalyzeWidgetBlueprint(const TSharedPtr<FJsonObject>& Params);
 	TSharedPtr<FJsonObject> HandleGetWidgetDetails(const TSharedPtr<FJsonObject>& Params);
 	TSharedPtr<FJsonObject> HandleCreateWidgetBlueprint(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleAddWidgetChild(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleSetWidgetProperty(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleRemoveWidget(const TSharedPtr<FJsonObject>& Params);
 	TSharedPtr<FJsonObject> SerializeWidget(class UWidget* Widget, int32 Depth);
 };

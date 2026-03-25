@@ -19,6 +19,20 @@
 #include "Components/HorizontalBoxSlot.h"
 #include "Components/VerticalBoxSlot.h"
 #include "Components/OverlaySlot.h"
+#include "Components/VerticalBox.h"
+#include "Components/HorizontalBox.h"
+#include "Components/Overlay.h"
+#include "Components/Border.h"
+#include "Components/Spacer.h"
+#include "Components/SizeBox.h"
+#include "Components/CheckBox.h"
+#include "Components/Slider.h"
+#include "Components/ScrollBox.h"
+#include "Components/WidgetSwitcher.h"
+#include "Components/ListView.h"
+#include "Components/RichTextBlock.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/KismetEditorUtilities.h"
 
 FEpicUnrealMCPWidgetCommands::FEpicUnrealMCPWidgetCommands()
 {
@@ -41,6 +55,18 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPWidgetCommands::HandleCommand(const FStrin
 	else if (CommandType == TEXT("create_widget_blueprint"))
 	{
 		return HandleCreateWidgetBlueprint(Params);
+	}
+	else if (CommandType == TEXT("add_widget_child"))
+	{
+		return HandleAddWidgetChild(Params);
+	}
+	else if (CommandType == TEXT("set_widget_property"))
+	{
+		return HandleSetWidgetProperty(Params);
+	}
+	else if (CommandType == TEXT("remove_widget"))
+	{
+		return HandleRemoveWidget(Params);
 	}
 
 	return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Unknown Widget command: %s"), *CommandType));
@@ -503,5 +529,395 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPWidgetCommands::HandleCreateWidgetBlueprin
 	Result->SetStringField(TEXT("name"), WidgetName);
 	Result->SetStringField(TEXT("path"), CreatedAsset->GetPathName());
 	Result->SetStringField(TEXT("parent_class"), ParentClass->GetName());
+	return Result;
+}
+
+// ============================================================================
+// add_widget_child — Add a child widget to a Widget Blueprint
+// ============================================================================
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPWidgetCommands::HandleAddWidgetChild(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	if (!Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'asset_path' parameter"));
+	}
+
+	FString WidgetType;
+	if (!Params->TryGetStringField(TEXT("widget_type"), WidgetType))
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'widget_type' parameter"));
+	}
+
+	FString WidgetName;
+	if (!Params->TryGetStringField(TEXT("widget_name"), WidgetName))
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'widget_name' parameter"));
+	}
+
+	// Load the widget blueprint
+	UObject* LoadedAsset = UEditorAssetLibrary::LoadAsset(AssetPath);
+	UWidgetBlueprint* WidgetBP = Cast<UWidgetBlueprint>(LoadedAsset);
+	if (!WidgetBP || !WidgetBP->WidgetTree)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Failed to load Widget Blueprint: %s"), *AssetPath));
+	}
+
+	UWidgetTree* Tree = WidgetBP->WidgetTree;
+
+	// Check if widget name already exists
+	if (Tree->FindWidget(FName(*WidgetName)))
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Widget '%s' already exists"), *WidgetName));
+	}
+
+	// Map widget type string to UClass
+	static const TMap<FString, UClass*> WidgetClassMap = {
+		{TEXT("TextBlock"), UTextBlock::StaticClass()},
+		{TEXT("Image"), UImage::StaticClass()},
+		{TEXT("Button"), UButton::StaticClass()},
+		{TEXT("CanvasPanel"), UCanvasPanel::StaticClass()},
+		{TEXT("VerticalBox"), UVerticalBox::StaticClass()},
+		{TEXT("HorizontalBox"), UHorizontalBox::StaticClass()},
+		{TEXT("Overlay"), UOverlay::StaticClass()},
+		{TEXT("Border"), UBorder::StaticClass()},
+		{TEXT("ProgressBar"), UProgressBar::StaticClass()},
+		{TEXT("Spacer"), USpacer::StaticClass()},
+		{TEXT("SizeBox"), USizeBox::StaticClass()},
+		{TEXT("CheckBox"), UCheckBox::StaticClass()},
+		{TEXT("Slider"), USlider::StaticClass()},
+		{TEXT("ScrollBox"), UScrollBox::StaticClass()},
+		{TEXT("WidgetSwitcher"), UWidgetSwitcher::StaticClass()},
+		{TEXT("RichTextBlock"), URichTextBlock::StaticClass()},
+	};
+
+	UClass* const* FoundClass = WidgetClassMap.Find(WidgetType);
+	if (!FoundClass)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Unknown widget type: %s. Supported: TextBlock, Image, Button, CanvasPanel, VerticalBox, HorizontalBox, Overlay, Border, ProgressBar, Spacer, SizeBox, CheckBox, Slider, ScrollBox, WidgetSwitcher, RichTextBlock"), *WidgetType));
+	}
+
+	// Create the widget via WidgetTree (correct way — sets Outer and RF_Transactional)
+	UWidget* NewWidget = Tree->ConstructWidget<UWidget>(*FoundClass, FName(*WidgetName));
+	if (!NewWidget)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to construct widget"));
+	}
+
+	// Find parent widget (optional — defaults to root)
+	FString ParentName;
+	UPanelWidget* ParentPanel = nullptr;
+
+	if (Params->TryGetStringField(TEXT("parent_name"), ParentName) && !ParentName.IsEmpty())
+	{
+		UWidget* FoundParent = Tree->FindWidget(FName(*ParentName));
+		ParentPanel = Cast<UPanelWidget>(FoundParent);
+		if (!ParentPanel)
+		{
+			return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Parent '%s' not found or is not a panel widget"), *ParentName));
+		}
+	}
+	else
+	{
+		// Add to root panel
+		ParentPanel = Cast<UPanelWidget>(Tree->RootWidget);
+		if (!ParentPanel)
+		{
+			// No root panel — set this widget as root if it's a panel, otherwise create a canvas
+			if (UPanelWidget* AsPanel = Cast<UPanelWidget>(NewWidget))
+			{
+				Tree->RootWidget = AsPanel;
+			}
+			else
+			{
+				UCanvasPanel* Canvas = Tree->ConstructWidget<UCanvasPanel>(UCanvasPanel::StaticClass(), TEXT("RootCanvas"));
+				Tree->RootWidget = Canvas;
+				ParentPanel = Canvas;
+			}
+		}
+	}
+
+	// Add as child
+	UPanelSlot* Slot = nullptr;
+	if (ParentPanel)
+	{
+		Slot = ParentPanel->AddChild(NewWidget);
+	}
+
+	// Apply slot properties if provided and it's a canvas slot
+	if (UCanvasPanelSlot* CanvasSlot = Cast<UCanvasPanelSlot>(Slot))
+	{
+		if (Params->HasField(TEXT("position")))
+		{
+			FVector2D Pos = FVector2D(
+				Params->GetObjectField(TEXT("position"))->GetNumberField(TEXT("x")),
+				Params->GetObjectField(TEXT("position"))->GetNumberField(TEXT("y"))
+			);
+			CanvasSlot->SetPosition(Pos);
+		}
+		if (Params->HasField(TEXT("size")))
+		{
+			FVector2D Size = FVector2D(
+				Params->GetObjectField(TEXT("size"))->GetNumberField(TEXT("x")),
+				Params->GetObjectField(TEXT("size"))->GetNumberField(TEXT("y"))
+			);
+			CanvasSlot->SetSize(Size);
+		}
+		if (Params->HasField(TEXT("anchors")))
+		{
+			const TSharedPtr<FJsonObject>& AnchorsObj = Params->GetObjectField(TEXT("anchors"));
+			FAnchors Anchors(
+				AnchorsObj->GetNumberField(TEXT("min_x")),
+				AnchorsObj->GetNumberField(TEXT("min_y")),
+				AnchorsObj->HasField(TEXT("max_x")) ? AnchorsObj->GetNumberField(TEXT("max_x")) : AnchorsObj->GetNumberField(TEXT("min_x")),
+				AnchorsObj->HasField(TEXT("max_y")) ? AnchorsObj->GetNumberField(TEXT("max_y")) : AnchorsObj->GetNumberField(TEXT("min_y"))
+			);
+			CanvasSlot->SetAnchors(Anchors);
+		}
+		if (Params->HasField(TEXT("alignment")))
+		{
+			FVector2D Align = FVector2D(
+				Params->GetObjectField(TEXT("alignment"))->GetNumberField(TEXT("x")),
+				Params->GetObjectField(TEXT("alignment"))->GetNumberField(TEXT("y"))
+			);
+			CanvasSlot->SetAlignment(Align);
+		}
+		if (Params->HasField(TEXT("auto_size")))
+		{
+			CanvasSlot->SetAutoSize(Params->GetBoolField(TEXT("auto_size")));
+		}
+		if (Params->HasField(TEXT("z_order")))
+		{
+			CanvasSlot->SetZOrder(static_cast<int32>(Params->GetNumberField(TEXT("z_order"))));
+		}
+	}
+
+	// Set initial text for TextBlock
+	if (UTextBlock* TextWidget = Cast<UTextBlock>(NewWidget))
+	{
+		FString Text;
+		if (Params->TryGetStringField(TEXT("text"), Text))
+		{
+			TextWidget->SetText(FText::FromString(Text));
+		}
+	}
+
+	// Set initial visibility
+	FString VisibilityStr;
+	if (Params->TryGetStringField(TEXT("visibility"), VisibilityStr))
+	{
+		if (VisibilityStr == TEXT("Collapsed")) NewWidget->SetVisibility(ESlateVisibility::Collapsed);
+		else if (VisibilityStr == TEXT("Hidden")) NewWidget->SetVisibility(ESlateVisibility::Hidden);
+		else if (VisibilityStr == TEXT("HitTestInvisible")) NewWidget->SetVisibility(ESlateVisibility::HitTestInvisible);
+		else if (VisibilityStr == TEXT("SelfHitTestInvisible")) NewWidget->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+		else NewWidget->SetVisibility(ESlateVisibility::Visible);
+	}
+
+	// Compile
+	FBlueprintEditorUtils::MarkBlueprintAsModified(WidgetBP);
+	FKismetEditorUtilities::CompileBlueprint(WidgetBP);
+
+	TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
+	Result->SetBoolField(TEXT("success"), true);
+	Result->SetStringField(TEXT("widget_name"), WidgetName);
+	Result->SetStringField(TEXT("widget_type"), WidgetType);
+	Result->SetStringField(TEXT("parent"), ParentPanel ? ParentPanel->GetName() : TEXT("(root)"));
+	Result->SetStringField(TEXT("slot_type"), Slot ? Slot->GetClass()->GetName() : TEXT("none"));
+	return Result;
+}
+
+// ============================================================================
+// set_widget_property — Modify properties on an existing widget
+// ============================================================================
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPWidgetCommands::HandleSetWidgetProperty(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	if (!Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'asset_path' parameter"));
+	}
+
+	FString WidgetName;
+	if (!Params->TryGetStringField(TEXT("widget_name"), WidgetName))
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'widget_name' parameter"));
+	}
+
+	UObject* LoadedAsset = UEditorAssetLibrary::LoadAsset(AssetPath);
+	UWidgetBlueprint* WidgetBP = Cast<UWidgetBlueprint>(LoadedAsset);
+	if (!WidgetBP || !WidgetBP->WidgetTree)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Failed to load Widget Blueprint: %s"), *AssetPath));
+	}
+
+	UWidget* Widget = WidgetBP->WidgetTree->FindWidget(FName(*WidgetName));
+	if (!Widget)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Widget '%s' not found"), *WidgetName));
+	}
+
+	TArray<FString> SetFields;
+
+	// Visibility
+	FString VisibilityStr;
+	if (Params->TryGetStringField(TEXT("visibility"), VisibilityStr))
+	{
+		if (VisibilityStr == TEXT("Visible")) Widget->SetVisibility(ESlateVisibility::Visible);
+		else if (VisibilityStr == TEXT("Collapsed")) Widget->SetVisibility(ESlateVisibility::Collapsed);
+		else if (VisibilityStr == TEXT("Hidden")) Widget->SetVisibility(ESlateVisibility::Hidden);
+		else if (VisibilityStr == TEXT("HitTestInvisible")) Widget->SetVisibility(ESlateVisibility::HitTestInvisible);
+		else if (VisibilityStr == TEXT("SelfHitTestInvisible")) Widget->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+		SetFields.Add(TEXT("visibility"));
+	}
+
+	// Render opacity
+	if (Params->HasField(TEXT("render_opacity")))
+	{
+		Widget->SetRenderOpacity(static_cast<float>(Params->GetNumberField(TEXT("render_opacity"))));
+		SetFields.Add(TEXT("render_opacity"));
+	}
+
+	// Is enabled
+	if (Params->HasField(TEXT("is_enabled")))
+	{
+		Widget->SetIsEnabled(Params->GetBoolField(TEXT("is_enabled")));
+		SetFields.Add(TEXT("is_enabled"));
+	}
+
+	// TextBlock-specific
+	if (UTextBlock* TextWidget = Cast<UTextBlock>(Widget))
+	{
+		FString Text;
+		if (Params->TryGetStringField(TEXT("text"), Text))
+		{
+			TextWidget->SetText(FText::FromString(Text));
+			SetFields.Add(TEXT("text"));
+		}
+
+		if (Params->HasField(TEXT("color")))
+		{
+			const TSharedPtr<FJsonObject>& ColorObj = Params->GetObjectField(TEXT("color"));
+			FLinearColor Color(
+				static_cast<float>(ColorObj->GetNumberField(TEXT("r"))),
+				static_cast<float>(ColorObj->GetNumberField(TEXT("g"))),
+				static_cast<float>(ColorObj->GetNumberField(TEXT("b"))),
+				ColorObj->HasField(TEXT("a")) ? static_cast<float>(ColorObj->GetNumberField(TEXT("a"))) : 1.0f
+			);
+			TextWidget->SetColorAndOpacity(FSlateColor(Color));
+			SetFields.Add(TEXT("color"));
+		}
+
+		if (Params->HasField(TEXT("auto_wrap")))
+		{
+			TextWidget->SetAutoWrapText(Params->GetBoolField(TEXT("auto_wrap")));
+			SetFields.Add(TEXT("auto_wrap"));
+		}
+	}
+
+	// Image-specific
+	if (UImage* ImageWidget = Cast<UImage>(Widget))
+	{
+		if (Params->HasField(TEXT("color")))
+		{
+			const TSharedPtr<FJsonObject>& ColorObj = Params->GetObjectField(TEXT("color"));
+			FLinearColor Color(
+				static_cast<float>(ColorObj->GetNumberField(TEXT("r"))),
+				static_cast<float>(ColorObj->GetNumberField(TEXT("g"))),
+				static_cast<float>(ColorObj->GetNumberField(TEXT("b"))),
+				ColorObj->HasField(TEXT("a")) ? static_cast<float>(ColorObj->GetNumberField(TEXT("a"))) : 1.0f
+			);
+			ImageWidget->SetColorAndOpacity(Color);
+			SetFields.Add(TEXT("color"));
+		}
+
+		FString TexturePath;
+		if (Params->TryGetStringField(TEXT("texture"), TexturePath))
+		{
+			UTexture2D* Texture = Cast<UTexture2D>(UEditorAssetLibrary::LoadAsset(TexturePath));
+			if (Texture)
+			{
+				ImageWidget->SetBrushFromTexture(Texture);
+				SetFields.Add(TEXT("texture"));
+			}
+		}
+	}
+
+	// ProgressBar-specific
+	if (UProgressBar* BarWidget = Cast<UProgressBar>(Widget))
+	{
+		if (Params->HasField(TEXT("percent")))
+		{
+			BarWidget->SetPercent(static_cast<float>(Params->GetNumberField(TEXT("percent"))));
+			SetFields.Add(TEXT("percent"));
+		}
+	}
+
+	// Compile
+	FBlueprintEditorUtils::MarkBlueprintAsModified(WidgetBP);
+	FKismetEditorUtilities::CompileBlueprint(WidgetBP);
+
+	TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
+	Result->SetBoolField(TEXT("success"), true);
+	Result->SetStringField(TEXT("widget_name"), WidgetName);
+	Result->SetNumberField(TEXT("properties_set"), SetFields.Num());
+
+	TArray<TSharedPtr<FJsonValue>> SetArray;
+	for (const FString& F : SetFields)
+	{
+		SetArray.Add(MakeShareable(new FJsonValueString(F)));
+	}
+	Result->SetArrayField(TEXT("fields_set"), SetArray);
+	return Result;
+}
+
+// ============================================================================
+// remove_widget — Remove a widget from a Widget Blueprint
+// ============================================================================
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPWidgetCommands::HandleRemoveWidget(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	if (!Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'asset_path' parameter"));
+	}
+
+	FString WidgetName;
+	if (!Params->TryGetStringField(TEXT("widget_name"), WidgetName))
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'widget_name' parameter"));
+	}
+
+	UObject* LoadedAsset = UEditorAssetLibrary::LoadAsset(AssetPath);
+	UWidgetBlueprint* WidgetBP = Cast<UWidgetBlueprint>(LoadedAsset);
+	if (!WidgetBP || !WidgetBP->WidgetTree)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Failed to load Widget Blueprint: %s"), *AssetPath));
+	}
+
+	UWidget* Widget = WidgetBP->WidgetTree->FindWidget(FName(*WidgetName));
+	if (!Widget)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Widget '%s' not found"), *WidgetName));
+	}
+
+	bool bRemoved = WidgetBP->WidgetTree->RemoveWidget(Widget);
+
+	if (bRemoved)
+	{
+		FBlueprintEditorUtils::MarkBlueprintAsModified(WidgetBP);
+		FKismetEditorUtilities::CompileBlueprint(WidgetBP);
+	}
+
+	TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
+	Result->SetBoolField(TEXT("success"), bRemoved);
+	Result->SetStringField(TEXT("widget_name"), WidgetName);
+	Result->SetBoolField(TEXT("removed"), bRemoved);
+	if (!bRemoved)
+	{
+		Result->SetStringField(TEXT("message"), TEXT("Widget found but could not be removed"));
+	}
 	return Result;
 }
