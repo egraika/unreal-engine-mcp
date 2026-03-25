@@ -8,6 +8,14 @@
 #include "Animation/BlendSpace.h"
 #include "Animation/AnimationAsset.h"
 #include "Animation/AnimNotifies/AnimNotifyState.h"
+#include "Engine/SkeletalMesh.h"
+#include "Engine/SkeletalMeshSocket.h"
+#include "Engine/StaticMesh.h"
+#include "Engine/StaticMeshActor.h"
+#include "Animation/Skeleton.h"
+#include "Components/StaticMeshComponent.h"
+#include "Kismet/GameplayStatics.h"
+#include "Editor.h"
 
 FEpicUnrealMCPAnimationCommands::FEpicUnrealMCPAnimationCommands()
 {
@@ -30,6 +38,30 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPAnimationCommands::HandleCommand(const FSt
 	else if (CommandType == TEXT("list_animation_assets"))
 	{
 		return HandleListAnimationAssets(Params);
+	}
+	else if (CommandType == TEXT("get_skeletal_mesh_info"))
+	{
+		return HandleGetSkeletalMeshInfo(Params);
+	}
+	else if (CommandType == TEXT("add_socket_to_skeleton"))
+	{
+		return HandleAddSocketToSkeleton(Params);
+	}
+	else if (CommandType == TEXT("modify_socket"))
+	{
+		return HandleModifySocket(Params);
+	}
+	else if (CommandType == TEXT("remove_socket"))
+	{
+		return HandleRemoveSocket(Params);
+	}
+	else if (CommandType == TEXT("preview_mesh_on_socket"))
+	{
+		return HandlePreviewMeshOnSocket(Params);
+	}
+	else if (CommandType == TEXT("clear_socket_preview"))
+	{
+		return HandleClearSocketPreview(Params);
 	}
 
 	return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Unknown Animation command: %s"), *CommandType));
@@ -302,6 +334,483 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPAnimationCommands::HandleListAnimationAsse
 	Result->SetNumberField(TEXT("total_found"), TotalFound);
 	Result->SetNumberField(TEXT("returned"), Count);
 	Result->SetArrayField(TEXT("assets"), AssetsArray);
+
+	return Result;
+}
+
+// ============================================================================
+// Helpers: JSON <-> Vector/Rotator
+// ============================================================================
+
+static FVector JsonToVector(const TSharedPtr<FJsonObject>& Obj, const FVector& Default = FVector::ZeroVector)
+{
+	if (!Obj.IsValid()) return Default;
+	return FVector(
+		Obj->GetNumberField(TEXT("x")),
+		Obj->GetNumberField(TEXT("y")),
+		Obj->GetNumberField(TEXT("z"))
+	);
+}
+
+static FRotator JsonToRotator(const TSharedPtr<FJsonObject>& Obj, const FRotator& Default = FRotator::ZeroRotator)
+{
+	if (!Obj.IsValid()) return Default;
+	return FRotator(
+		Obj->GetNumberField(TEXT("pitch")),
+		Obj->GetNumberField(TEXT("yaw")),
+		Obj->GetNumberField(TEXT("roll"))
+	);
+}
+
+// ============================================================================
+// Helper: Load USkeleton from asset_path param
+// ============================================================================
+
+static USkeleton* LoadSkeleton(const TSharedPtr<FJsonObject>& Params, TSharedPtr<FJsonObject>& OutError)
+{
+	if (!Params->HasField(TEXT("asset_path")))
+	{
+		OutError = FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing required field: asset_path"));
+		return nullptr;
+	}
+
+	const FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+	UObject* LoadedAsset = UEditorAssetLibrary::LoadAsset(AssetPath);
+	if (!LoadedAsset)
+	{
+		OutError = FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Failed to load asset: %s"), *AssetPath));
+		return nullptr;
+	}
+
+	// Try direct cast to USkeleton
+	USkeleton* Skeleton = Cast<USkeleton>(LoadedAsset);
+	if (Skeleton)
+	{
+		return Skeleton;
+	}
+
+	// If it's a USkeletalMesh, get its skeleton
+	USkeletalMesh* SkelMesh = Cast<USkeletalMesh>(LoadedAsset);
+	if (SkelMesh)
+	{
+		Skeleton = SkelMesh->GetSkeleton();
+		if (Skeleton)
+		{
+			return Skeleton;
+		}
+		OutError = FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("SkeletalMesh '%s' has no skeleton"), *AssetPath));
+		return nullptr;
+	}
+
+	OutError = FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Asset is not a USkeleton or USkeletalMesh: %s (is %s)"), *AssetPath, *LoadedAsset->GetClass()->GetName()));
+	return nullptr;
+}
+
+// ============================================================================
+// get_skeletal_mesh_info
+// ============================================================================
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPAnimationCommands::HandleGetSkeletalMeshInfo(const TSharedPtr<FJsonObject>& Params)
+{
+	if (!Params->HasField(TEXT("asset_path")))
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing required field: asset_path"));
+	}
+
+	const FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+	const bool bIncludeBones = !Params->HasField(TEXT("include_bones")) || Params->GetBoolField(TEXT("include_bones"));
+
+	UObject* LoadedAsset = UEditorAssetLibrary::LoadAsset(AssetPath);
+	if (!LoadedAsset)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Failed to load asset: %s"), *AssetPath));
+	}
+
+	USkeletalMesh* SkelMesh = Cast<USkeletalMesh>(LoadedAsset);
+	if (!SkelMesh)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Asset is not a USkeletalMesh: %s (is %s)"), *AssetPath, *LoadedAsset->GetClass()->GetName()));
+	}
+
+	TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
+	Result->SetBoolField(TEXT("success"), true);
+	Result->SetStringField(TEXT("asset_path"), AssetPath);
+	Result->SetStringField(TEXT("asset_name"), SkelMesh->GetName());
+
+	USkeleton* Skeleton = SkelMesh->GetSkeleton();
+	if (Skeleton)
+	{
+		Result->SetStringField(TEXT("skeleton"), Skeleton->GetPathName());
+	}
+
+	const FReferenceSkeleton& RefSkeleton = SkelMesh->GetRefSkeleton();
+	const int32 NumBones = RefSkeleton.GetNum();
+	Result->SetNumberField(TEXT("num_bones"), NumBones);
+	Result->SetNumberField(TEXT("num_lods"), SkelMesh->GetLODNum());
+
+	const TArray<FSkeletalMaterial>& Materials = SkelMesh->GetMaterials();
+	Result->SetNumberField(TEXT("num_materials"), Materials.Num());
+
+	// Sockets (combined mesh + skeleton)
+	TArray<USkeletalMeshSocket*> ActiveSockets = SkelMesh->GetActiveSocketList();
+	Result->SetNumberField(TEXT("num_sockets"), ActiveSockets.Num());
+
+	TArray<TSharedPtr<FJsonValue>> SocketsArray;
+	for (const USkeletalMeshSocket* Socket : ActiveSockets)
+	{
+		if (!Socket) continue;
+
+		TSharedPtr<FJsonObject> SocketObj = MakeShareable(new FJsonObject);
+		SocketObj->SetStringField(TEXT("name"), Socket->SocketName.ToString());
+		SocketObj->SetStringField(TEXT("bone"), Socket->BoneName.ToString());
+
+		TSharedPtr<FJsonObject> LocObj = MakeShareable(new FJsonObject);
+		LocObj->SetNumberField(TEXT("x"), Socket->RelativeLocation.X);
+		LocObj->SetNumberField(TEXT("y"), Socket->RelativeLocation.Y);
+		LocObj->SetNumberField(TEXT("z"), Socket->RelativeLocation.Z);
+		SocketObj->SetObjectField(TEXT("location"), LocObj);
+
+		TSharedPtr<FJsonObject> RotObj = MakeShareable(new FJsonObject);
+		RotObj->SetNumberField(TEXT("pitch"), Socket->RelativeRotation.Pitch);
+		RotObj->SetNumberField(TEXT("yaw"), Socket->RelativeRotation.Yaw);
+		RotObj->SetNumberField(TEXT("roll"), Socket->RelativeRotation.Roll);
+		SocketObj->SetObjectField(TEXT("rotation"), RotObj);
+
+		TSharedPtr<FJsonObject> ScaleObj = MakeShareable(new FJsonObject);
+		ScaleObj->SetNumberField(TEXT("x"), Socket->RelativeScale.X);
+		ScaleObj->SetNumberField(TEXT("y"), Socket->RelativeScale.Y);
+		ScaleObj->SetNumberField(TEXT("z"), Socket->RelativeScale.Z);
+		SocketObj->SetObjectField(TEXT("scale"), ScaleObj);
+
+		SocketsArray.Add(MakeShareable(new FJsonValueObject(SocketObj)));
+	}
+	Result->SetArrayField(TEXT("sockets"), SocketsArray);
+
+	if (bIncludeBones)
+	{
+		TArray<TSharedPtr<FJsonValue>> BonesArray;
+		for (int32 i = 0; i < NumBones; ++i)
+		{
+			TSharedPtr<FJsonObject> BoneObj = MakeShareable(new FJsonObject);
+			BoneObj->SetNumberField(TEXT("index"), i);
+			BoneObj->SetStringField(TEXT("name"), RefSkeleton.GetBoneName(i).ToString());
+			BoneObj->SetNumberField(TEXT("parent_index"), RefSkeleton.GetParentIndex(i));
+			BonesArray.Add(MakeShareable(new FJsonValueObject(BoneObj)));
+		}
+		Result->SetArrayField(TEXT("bones"), BonesArray);
+	}
+
+	return Result;
+}
+
+// ============================================================================
+// add_socket_to_skeleton
+// ============================================================================
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPAnimationCommands::HandleAddSocketToSkeleton(const TSharedPtr<FJsonObject>& Params)
+{
+	TSharedPtr<FJsonObject> Error;
+	USkeleton* Skeleton = LoadSkeleton(Params, Error);
+	if (!Skeleton) return Error;
+
+	if (!Params->HasField(TEXT("socket_name")))
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing required field: socket_name"));
+	if (!Params->HasField(TEXT("bone_name")))
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing required field: bone_name"));
+
+	const FString SocketName = Params->GetStringField(TEXT("socket_name"));
+	const FString BoneName = Params->GetStringField(TEXT("bone_name"));
+
+	// Check if socket already exists
+	if (Skeleton->FindSocket(FName(*SocketName)))
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Socket '%s' already exists on skeleton"), *SocketName));
+	}
+
+	// Validate bone exists
+	const FReferenceSkeleton& RefSkel = Skeleton->GetReferenceSkeleton();
+	if (RefSkel.FindBoneIndex(FName(*BoneName)) == INDEX_NONE)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Bone '%s' not found on skeleton"), *BoneName));
+	}
+
+	// Create socket
+	USkeletalMeshSocket* NewSocket = NewObject<USkeletalMeshSocket>(Skeleton);
+	NewSocket->SocketName = FName(*SocketName);
+	NewSocket->BoneName = FName(*BoneName);
+
+	// Optional transform
+	const TSharedPtr<FJsonObject>* LocPtr = nullptr;
+	if (Params->TryGetObjectField(TEXT("location"), LocPtr) && LocPtr)
+		NewSocket->RelativeLocation = JsonToVector(*LocPtr);
+
+	const TSharedPtr<FJsonObject>* RotPtr = nullptr;
+	if (Params->TryGetObjectField(TEXT("rotation"), RotPtr) && RotPtr)
+		NewSocket->RelativeRotation = JsonToRotator(*RotPtr);
+
+	const TSharedPtr<FJsonObject>* ScalePtr = nullptr;
+	if (Params->TryGetObjectField(TEXT("scale"), ScalePtr) && ScalePtr)
+		NewSocket->RelativeScale = JsonToVector(*ScalePtr, FVector::OneVector);
+
+	Skeleton->Sockets.Add(NewSocket);
+	Skeleton->MarkPackageDirty();
+
+	TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
+	Result->SetBoolField(TEXT("success"), true);
+	Result->SetStringField(TEXT("socket_name"), SocketName);
+	Result->SetStringField(TEXT("bone_name"), BoneName);
+	Result->SetStringField(TEXT("skeleton"), Skeleton->GetPathName());
+
+	return Result;
+}
+
+// ============================================================================
+// modify_socket
+// ============================================================================
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPAnimationCommands::HandleModifySocket(const TSharedPtr<FJsonObject>& Params)
+{
+	TSharedPtr<FJsonObject> Error;
+	USkeleton* Skeleton = LoadSkeleton(Params, Error);
+	if (!Skeleton) return Error;
+
+	if (!Params->HasField(TEXT("socket_name")))
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing required field: socket_name"));
+
+	const FString SocketName = Params->GetStringField(TEXT("socket_name"));
+
+	USkeletalMeshSocket* Socket = Skeleton->FindSocket(FName(*SocketName));
+	if (!Socket)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Socket '%s' not found on skeleton"), *SocketName));
+	}
+
+	// Optional: change parent bone
+	if (Params->HasField(TEXT("bone_name")))
+	{
+		const FString BoneName = Params->GetStringField(TEXT("bone_name"));
+		const FReferenceSkeleton& RefSkel = Skeleton->GetReferenceSkeleton();
+		if (RefSkel.FindBoneIndex(FName(*BoneName)) == INDEX_NONE)
+		{
+			return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Bone '%s' not found on skeleton"), *BoneName));
+		}
+		Socket->BoneName = FName(*BoneName);
+	}
+
+	const TSharedPtr<FJsonObject>* LocPtr = nullptr;
+	if (Params->TryGetObjectField(TEXT("location"), LocPtr) && LocPtr)
+		Socket->RelativeLocation = JsonToVector(*LocPtr);
+
+	const TSharedPtr<FJsonObject>* RotPtr = nullptr;
+	if (Params->TryGetObjectField(TEXT("rotation"), RotPtr) && RotPtr)
+		Socket->RelativeRotation = JsonToRotator(*RotPtr);
+
+	const TSharedPtr<FJsonObject>* ScalePtr = nullptr;
+	if (Params->TryGetObjectField(TEXT("scale"), ScalePtr) && ScalePtr)
+		Socket->RelativeScale = JsonToVector(*ScalePtr, FVector::OneVector);
+
+	Skeleton->MarkPackageDirty();
+
+	TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
+	Result->SetBoolField(TEXT("success"), true);
+	Result->SetStringField(TEXT("socket_name"), SocketName);
+	Result->SetStringField(TEXT("bone_name"), Socket->BoneName.ToString());
+
+	TSharedPtr<FJsonObject> LocObj = MakeShareable(new FJsonObject);
+	LocObj->SetNumberField(TEXT("x"), Socket->RelativeLocation.X);
+	LocObj->SetNumberField(TEXT("y"), Socket->RelativeLocation.Y);
+	LocObj->SetNumberField(TEXT("z"), Socket->RelativeLocation.Z);
+	Result->SetObjectField(TEXT("location"), LocObj);
+
+	TSharedPtr<FJsonObject> RotObj = MakeShareable(new FJsonObject);
+	RotObj->SetNumberField(TEXT("pitch"), Socket->RelativeRotation.Pitch);
+	RotObj->SetNumberField(TEXT("yaw"), Socket->RelativeRotation.Yaw);
+	RotObj->SetNumberField(TEXT("roll"), Socket->RelativeRotation.Roll);
+	Result->SetObjectField(TEXT("rotation"), RotObj);
+
+	return Result;
+}
+
+// ============================================================================
+// remove_socket
+// ============================================================================
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPAnimationCommands::HandleRemoveSocket(const TSharedPtr<FJsonObject>& Params)
+{
+	TSharedPtr<FJsonObject> Error;
+	USkeleton* Skeleton = LoadSkeleton(Params, Error);
+	if (!Skeleton) return Error;
+
+	if (!Params->HasField(TEXT("socket_name")))
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing required field: socket_name"));
+
+	const FString SocketName = Params->GetStringField(TEXT("socket_name"));
+
+	int32 FoundIndex = INDEX_NONE;
+	Skeleton->FindSocketAndIndex(FName(*SocketName), FoundIndex);
+	if (FoundIndex == INDEX_NONE)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Socket '%s' not found on skeleton"), *SocketName));
+	}
+
+	Skeleton->Sockets.RemoveAt(FoundIndex);
+	Skeleton->MarkPackageDirty();
+
+	TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
+	Result->SetBoolField(TEXT("success"), true);
+	Result->SetStringField(TEXT("removed_socket"), SocketName);
+	Result->SetNumberField(TEXT("remaining_sockets"), Skeleton->Sockets.Num());
+
+	return Result;
+}
+
+// ============================================================================
+// preview_mesh_on_socket
+// ============================================================================
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPAnimationCommands::HandlePreviewMeshOnSocket(const TSharedPtr<FJsonObject>& Params)
+{
+	if (!Params->HasField(TEXT("actor_name")))
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing required field: actor_name"));
+	if (!Params->HasField(TEXT("socket_name")))
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing required field: socket_name"));
+	if (!Params->HasField(TEXT("mesh_path")))
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing required field: mesh_path"));
+
+	const FString ActorName = Params->GetStringField(TEXT("actor_name"));
+	const FString SocketName = Params->GetStringField(TEXT("socket_name"));
+	const FString MeshPath = Params->GetStringField(TEXT("mesh_path"));
+
+	// Find actor in level
+	UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+	if (!World)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("No editor world"));
+	}
+
+	AActor* TargetActor = nullptr;
+	for (TActorIterator<AActor> It(World); It; ++It)
+	{
+		if (It->GetActorLabel() == ActorName || It->GetName() == ActorName)
+		{
+			TargetActor = *It;
+			break;
+		}
+	}
+
+	if (!TargetActor)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Actor '%s' not found in level"), *ActorName));
+	}
+
+	// Get skeletal mesh component
+	USkeletalMeshComponent* SkelComp = TargetActor->FindComponentByClass<USkeletalMeshComponent>();
+	if (!SkelComp)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Actor '%s' has no SkeletalMeshComponent"), *ActorName));
+	}
+
+	// Verify socket exists
+	if (!SkelComp->DoesSocketExist(FName(*SocketName)))
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Socket '%s' not found on actor's mesh"), *SocketName));
+	}
+
+	// Load the preview mesh
+	UObject* MeshAsset = UEditorAssetLibrary::LoadAsset(MeshPath);
+	UStaticMesh* StaticMesh = Cast<UStaticMesh>(MeshAsset);
+	if (!StaticMesh)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Failed to load static mesh: %s"), *MeshPath));
+	}
+
+	// Spawn preview actor
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	AStaticMeshActor* PreviewActor = World->SpawnActor<AStaticMeshActor>(FVector::ZeroVector, FRotator::ZeroRotator, SpawnParams);
+	if (!PreviewActor)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to spawn preview actor"));
+	}
+
+	PreviewActor->SetActorLabel(FString::Printf(TEXT("MCP_Preview_%s_%s"), *ActorName, *SocketName));
+	PreviewActor->GetStaticMeshComponent()->SetStaticMesh(StaticMesh);
+	PreviewActor->GetStaticMeshComponent()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+
+	// Attach to socket
+	PreviewActor->AttachToComponent(SkelComp, FAttachmentTransformRules::SnapToTargetNotIncludingScale, FName(*SocketName));
+
+	// Apply optional offsets
+	const TSharedPtr<FJsonObject>* LocPtr = nullptr;
+	if (Params->TryGetObjectField(TEXT("location_offset"), LocPtr) && LocPtr)
+		PreviewActor->SetActorRelativeLocation(JsonToVector(*LocPtr));
+
+	const TSharedPtr<FJsonObject>* RotPtr = nullptr;
+	if (Params->TryGetObjectField(TEXT("rotation_offset"), RotPtr) && RotPtr)
+		PreviewActor->SetActorRelativeRotation(JsonToRotator(*RotPtr));
+
+	const TSharedPtr<FJsonObject>* ScalePtr = nullptr;
+	if (Params->TryGetObjectField(TEXT("scale"), ScalePtr) && ScalePtr)
+		PreviewActor->SetActorRelativeScale3D(JsonToVector(*ScalePtr, FVector::OneVector));
+
+	// Track for cleanup
+	PreviewActors.FindOrAdd(ActorName).Add(PreviewActor);
+
+	TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
+	Result->SetBoolField(TEXT("success"), true);
+	Result->SetStringField(TEXT("preview_actor"), PreviewActor->GetName());
+	Result->SetStringField(TEXT("attached_to"), ActorName);
+	Result->SetStringField(TEXT("socket"), SocketName);
+	Result->SetStringField(TEXT("mesh"), MeshPath);
+
+	return Result;
+}
+
+// ============================================================================
+// clear_socket_preview
+// ============================================================================
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPAnimationCommands::HandleClearSocketPreview(const TSharedPtr<FJsonObject>& Params)
+{
+	int32 Cleared = 0;
+
+	if (Params->HasField(TEXT("actor_name")))
+	{
+		const FString ActorName = Params->GetStringField(TEXT("actor_name"));
+		TArray<TWeakObjectPtr<AActor>>* Actors = PreviewActors.Find(ActorName);
+		if (Actors)
+		{
+			for (TWeakObjectPtr<AActor>& WeakActor : *Actors)
+			{
+				if (AActor* Actor = WeakActor.Get())
+				{
+					Actor->Destroy();
+					Cleared++;
+				}
+			}
+			PreviewActors.Remove(ActorName);
+		}
+	}
+	else
+	{
+		// Clear all previews
+		for (auto& KV : PreviewActors)
+		{
+			for (TWeakObjectPtr<AActor>& WeakActor : KV.Value)
+			{
+				if (AActor* Actor = WeakActor.Get())
+				{
+					Actor->Destroy();
+					Cleared++;
+				}
+			}
+		}
+		PreviewActors.Empty();
+	}
+
+	TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
+	Result->SetBoolField(TEXT("success"), true);
+	Result->SetNumberField(TEXT("cleared"), Cleared);
 
 	return Result;
 }

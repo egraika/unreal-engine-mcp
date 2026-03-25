@@ -20,4 +20,13 @@ private:
 	TSharedPtr<FJsonObject> HandleAnalyzeAnimMontage(const TSharedPtr<FJsonObject>& Params);
 	TSharedPtr<FJsonObject> HandleAnalyzeAnimSequence(const TSharedPtr<FJsonObject>& Params);
 	TSharedPtr<FJsonObject> HandleListAnimationAssets(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleGetSkeletalMeshInfo(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleAddSocketToSkeleton(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleModifySocket(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleRemoveSocket(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandlePreviewMeshOnSocket(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleClearSocketPreview(const TSharedPtr<FJsonObject>& Params);
+
+	// Preview mesh tracking for cleanup
+	TMap<FString, TArray<TWeakObjectPtr<AActor>>> PreviewActors;
 };

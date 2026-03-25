@@ -2785,12 +2785,210 @@ def rename_function(
         return {"success": False, "message": str(e)}
 
 
-# Run the server
+# =============================================================================
+# Skeletal Mesh & Socket Tools
+# =============================================================================
+
+@mcp.tool()
+def get_skeletal_mesh_info(
+    asset_path: str,
+    include_bones: bool = True
+) -> Dict[str, Any]:
+    """Read a Skeletal Mesh asset and return its sockets, bones, and metadata.
+
+    Args:
+        asset_path: Full asset path to the SkeletalMesh (e.g., "/Game/Characters/SK_Mannequin")
+        include_bones: Include full bone hierarchy. Default True.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("get_skeletal_mesh_info", {
+            "asset_path": asset_path,
+            "include_bones": include_bones
+        })
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"get_skeletal_mesh_info error: {e}")
+        return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def add_socket_to_skeleton(
+    asset_path: str,
+    socket_name: str,
+    bone_name: str,
+    location: Dict[str, float] = None,
+    rotation: Dict[str, float] = None,
+    scale: Dict[str, float] = None
+) -> Dict[str, Any]:
+    """Add a new socket to a USkeleton asset.
+
+    The asset_path can point to either a USkeleton or a USkeletalMesh (will use its skeleton).
+
+    Args:
+        asset_path: Path to skeleton or skeletal mesh asset
+        socket_name: Name for the new socket (e.g., "sheath_back")
+        bone_name: Bone to attach the socket to (e.g., "spine_05")
+        location: Optional relative location {"x": 0, "y": 0, "z": 0}
+        rotation: Optional relative rotation {"pitch": 0, "yaw": 0, "roll": 0}
+        scale: Optional relative scale {"x": 1, "y": 1, "z": 1}
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {
+            "asset_path": asset_path,
+            "socket_name": socket_name,
+            "bone_name": bone_name
+        }
+        if location is not None:
+            params["location"] = location
+        if rotation is not None:
+            params["rotation"] = rotation
+        if scale is not None:
+            params["scale"] = scale
+        response = unreal.send_command("add_socket_to_skeleton", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"add_socket_to_skeleton error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def modify_socket(
+    asset_path: str,
+    socket_name: str,
+    bone_name: str = "",
+    location: Dict[str, float] = None,
+    rotation: Dict[str, float] = None,
+    scale: Dict[str, float] = None
+) -> Dict[str, Any]:
+    """Modify an existing socket's transform or parent bone on a skeleton.
+
+    Only provided fields are updated; others remain unchanged.
+
+    Args:
+        asset_path: Path to skeleton or skeletal mesh asset
+        socket_name: Name of the socket to modify
+        bone_name: Optional new parent bone name
+        location: Optional new relative location {"x": 0, "y": 0, "z": 0}
+        rotation: Optional new relative rotation {"pitch": 0, "yaw": 0, "roll": 0}
+        scale: Optional new relative scale {"x": 1, "y": 1, "z": 1}
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {
+            "asset_path": asset_path,
+            "socket_name": socket_name
+        }
+        if bone_name:
+            params["bone_name"] = bone_name
+        if location is not None:
+            params["location"] = location
+        if rotation is not None:
+            params["rotation"] = rotation
+        if scale is not None:
+            params["scale"] = scale
+        response = unreal.send_command("modify_socket", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"modify_socket error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def remove_socket(asset_path: str, socket_name: str) -> Dict[str, Any]:
+    """Remove a socket from a skeleton.
+
+    Args:
+        asset_path: Path to skeleton or skeletal mesh asset
+        socket_name: Name of the socket to remove
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("remove_socket", {
+            "asset_path": asset_path,
+            "socket_name": socket_name
+        })
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"remove_socket error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def preview_mesh_on_socket(
+    actor_name: str,
+    socket_name: str,
+    mesh_path: str,
+    location_offset: Dict[str, float] = None,
+    rotation_offset: Dict[str, float] = None,
+    scale: Dict[str, float] = None
+) -> Dict[str, Any]:
+    """Spawn a temporary static mesh attached to a socket on an actor in the level.
+
+    Use this to visually preview how a weapon/item looks on a socket before finalizing
+    the socket position. Use clear_socket_preview to remove previews.
+
+    Args:
+        actor_name: Name or label of the actor in the level
+        socket_name: Socket to attach the preview mesh to
+        mesh_path: Asset path to the static mesh to preview
+        location_offset: Optional offset from socket {"x": 0, "y": 0, "z": 0}
+        rotation_offset: Optional rotation offset {"pitch": 0, "yaw": 0, "roll": 0}
+        scale: Optional scale {"x": 1, "y": 1, "z": 1}
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {
+            "actor_name": actor_name,
+            "socket_name": socket_name,
+            "mesh_path": mesh_path
+        }
+        if location_offset is not None:
+            params["location_offset"] = location_offset
+        if rotation_offset is not None:
+            params["rotation_offset"] = rotation_offset
+        if scale is not None:
+            params["scale"] = scale
+        response = unreal.send_command("preview_mesh_on_socket", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"preview_mesh_on_socket error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def clear_socket_preview(actor_name: str = "") -> Dict[str, Any]:
+    """Remove preview meshes spawned by preview_mesh_on_socket.
+
+    Args:
+        actor_name: Clear previews for this actor only. Empty = clear all previews.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {}
+        if actor_name:
+            params["actor_name"] = actor_name
+        response = unreal.send_command("clear_socket_preview", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"clear_socket_preview error: {e}")
+        return {"success": False, "message": str(e)}
 
 
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")
-    mcp.run(transport='stdio') 
+    mcp.run(transport='stdio')

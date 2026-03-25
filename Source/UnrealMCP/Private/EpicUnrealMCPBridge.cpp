@@ -317,10 +317,16 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
             {
                 ResultJson = RVTCommands->HandleCommand(CommandType, Params);
             }
-            // Animation Commands
+            // Animation & Skeleton Commands
             else if (CommandType == TEXT("analyze_anim_montage") ||
                      CommandType == TEXT("analyze_anim_sequence") ||
-                     CommandType == TEXT("list_animation_assets"))
+                     CommandType == TEXT("list_animation_assets") ||
+                     CommandType == TEXT("get_skeletal_mesh_info") ||
+                     CommandType == TEXT("add_socket_to_skeleton") ||
+                     CommandType == TEXT("modify_socket") ||
+                     CommandType == TEXT("remove_socket") ||
+                     CommandType == TEXT("preview_mesh_on_socket") ||
+                     CommandType == TEXT("clear_socket_preview"))
             {
                 ResultJson = AnimationCommands->HandleCommand(CommandType, Params);
             }
