@@ -3089,6 +3089,36 @@ def get_widget_details(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def create_widget_blueprint(
+    name: str,
+    path: str = "/Game/Blueprints/Widgets",
+    parent_class: str = ""
+) -> Dict[str, Any]:
+    """Create a new Widget Blueprint (UMG).
+
+    Creates an empty UWidgetBlueprint that can be opened in the UMG Designer.
+    Optionally specify a C++ parent class (must extend UUserWidget).
+
+    Args:
+        name: Name for the new widget blueprint (e.g., "WBP_BailPanel")
+        path: Content Browser folder path (e.g., "/Game/PRK/UI/Widgets")
+        parent_class: Optional C++ parent class name (e.g., "PRKDialogueWidget"). Defaults to UUserWidget.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {"name": name, "path": path}
+        if parent_class:
+            params["parent_class"] = parent_class
+        response = unreal.send_command("create_widget_blueprint", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"create_widget_blueprint error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")

@@ -15,7 +15,13 @@
 #include "Animation/Skeleton.h"
 #include "Components/StaticMeshComponent.h"
 #include "Kismet/GameplayStatics.h"
+#include "EngineUtils.h"
 #include "Editor.h"
+#include "Animation/PreviewAssetAttachComponent.h"
+#include "Engine/TextureRenderTarget2D.h"
+#include "Components/SceneCaptureComponent2D.h"
+#include "ImageUtils.h"
+#include "Misc/FileHelper.h"
 
 FEpicUnrealMCPAnimationCommands::FEpicUnrealMCPAnimationCommands()
 {
@@ -62,6 +68,10 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPAnimationCommands::HandleCommand(const FSt
 	else if (CommandType == TEXT("clear_socket_preview"))
 	{
 		return HandleClearSocketPreview(Params);
+	}
+	else if (CommandType == TEXT("capture_socket_preview"))
+	{
+		return HandleCaptureSocketPreview(Params);
 	}
 
 	return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Unknown Animation command: %s"), *CommandType));
@@ -811,6 +821,165 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPAnimationCommands::HandleClearSocketPrevie
 	TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
 	Result->SetBoolField(TEXT("success"), true);
 	Result->SetNumberField(TEXT("cleared"), Cleared);
+
+	return Result;
+}
+
+// ============================================================================
+// capture_socket_preview
+// ============================================================================
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPAnimationCommands::HandleCaptureSocketPreview(const TSharedPtr<FJsonObject>& Params)
+{
+	if (!Params->HasField(TEXT("skeleton_path")))
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing required field: skeleton_path"));
+	if (!Params->HasField(TEXT("socket_name")))
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing required field: socket_name"));
+	if (!Params->HasField(TEXT("mesh_path")))
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing required field: mesh_path"));
+
+	const FString SkeletonPath = Params->GetStringField(TEXT("skeleton_path"));
+	const FString SocketName = Params->GetStringField(TEXT("socket_name"));
+	const FString MeshPath = Params->GetStringField(TEXT("mesh_path"));
+	const int32 Resolution = Params->HasField(TEXT("resolution"))
+		? static_cast<int32>(Params->GetNumberField(TEXT("resolution")))
+		: 512;
+
+	// Load skeleton - create params with asset_path pointing to skeleton_path
+	TSharedPtr<FJsonObject> SkelParams = MakeShareable(new FJsonObject);
+	SkelParams->SetStringField(TEXT("asset_path"), SkeletonPath);
+	TSharedPtr<FJsonObject> Error;
+	USkeleton* Skeleton = LoadSkeleton(SkelParams, Error);
+	if (!Skeleton) return Error;
+
+	// Load the preview mesh
+	UObject* MeshAsset = UEditorAssetLibrary::LoadAsset(MeshPath);
+	if (!MeshAsset)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Failed to load mesh: %s"), *MeshPath));
+	}
+
+	// Add the mesh as a preview attachment on the socket
+	Skeleton->PreviewAttachedAssetContainer.AddAttachedObject(MeshAsset, FName(*SocketName));
+	Skeleton->MarkPackageDirty();
+
+	// Get the preview skeletal mesh for rendering
+	USkeletalMesh* PreviewMesh = Skeleton->GetPreviewMesh(true);
+	if (!PreviewMesh)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Skeleton has no preview mesh set"));
+	}
+
+	// Spawn temp scene for capture
+	UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+	if (!World)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("No editor world"));
+	}
+
+	// Spawn skeletal mesh actor
+	const FVector SpawnOrigin(0.0f, 0.0f, 50000.0f); // Far above to avoid overlap
+	AActor* TempActor = World->SpawnActor<AActor>(AActor::StaticClass(), SpawnOrigin, FRotator::ZeroRotator);
+	TempActor->SetFlags(RF_Transient);
+
+	USceneComponent* RootComp = NewObject<USceneComponent>(TempActor, TEXT("Root"));
+	TempActor->SetRootComponent(RootComp);
+	RootComp->RegisterComponent();
+
+	USkeletalMeshComponent* SkelComp = NewObject<USkeletalMeshComponent>(TempActor, TEXT("Body"));
+	SkelComp->SetupAttachment(RootComp);
+	SkelComp->SetSkeletalMeshAsset(PreviewMesh);
+	SkelComp->RegisterComponent();
+
+	// Attach the preview mesh to the socket
+	UStaticMesh* StaticMesh = Cast<UStaticMesh>(MeshAsset);
+	USkeletalMesh* SkelMeshAsset = Cast<USkeletalMesh>(MeshAsset);
+
+	USceneComponent* AttachedComp = nullptr;
+	if (StaticMesh)
+	{
+		UStaticMeshComponent* SMComp = NewObject<UStaticMeshComponent>(TempActor, TEXT("PreviewMesh"));
+		SMComp->SetupAttachment(SkelComp, FName(*SocketName));
+		SMComp->SetStaticMesh(StaticMesh);
+		SMComp->RegisterComponent();
+		AttachedComp = SMComp;
+	}
+	else if (SkelMeshAsset)
+	{
+		USkeletalMeshComponent* SKComp = NewObject<USkeletalMeshComponent>(TempActor, TEXT("PreviewMesh"));
+		SKComp->SetupAttachment(SkelComp, FName(*SocketName));
+		SKComp->SetSkeletalMeshAsset(SkelMeshAsset);
+		SKComp->RegisterComponent();
+		AttachedComp = SKComp;
+	}
+
+	// Calculate bounds for camera positioning
+	FBoxSphereBounds Bounds = SkelComp->CalcBounds(SkelComp->GetComponentTransform());
+
+	// Focus on the socket area
+	FVector SocketLocation = SpawnOrigin;
+	if (SkelComp->DoesSocketExist(FName(*SocketName)))
+	{
+		SocketLocation = SkelComp->GetSocketLocation(FName(*SocketName));
+	}
+
+	// Create render target
+	UTextureRenderTarget2D* RenderTarget = NewObject<UTextureRenderTarget2D>(GetTransientPackage());
+	RenderTarget->InitCustomFormat(Resolution, Resolution, PF_B8G8R8A8, false);
+	RenderTarget->ClearColor = FLinearColor(0.15f, 0.15f, 0.15f, 1.0f);
+	RenderTarget->UpdateResourceImmediate(true);
+
+	// Create scene capture
+	USceneCaptureComponent2D* CaptureComp = NewObject<USceneCaptureComponent2D>(TempActor, TEXT("Capture"));
+	CaptureComp->SetupAttachment(RootComp);
+	CaptureComp->TextureTarget = RenderTarget;
+	CaptureComp->CaptureSource = ESceneCaptureSource::SCS_FinalColorLDR;
+	CaptureComp->bCaptureEveryFrame = false;
+	CaptureComp->bCaptureOnMovement = false;
+	CaptureComp->RegisterComponent();
+
+	// Position camera to look at the socket from behind-right at 45 degrees
+	const float CamDist = Bounds.SphereRadius * 1.5f;
+	FVector CamOffset = FVector(-CamDist * 0.7f, CamDist * 0.5f, CamDist * 0.3f);
+	CaptureComp->SetWorldLocationAndRotation(
+		SocketLocation + CamOffset,
+		(SocketLocation - (SocketLocation + CamOffset)).Rotation()
+	);
+
+	// Capture
+	CaptureComp->CaptureScene();
+	FlushRenderingCommands();
+
+	// Read pixels
+	TArray<FColor> Pixels;
+	FTextureRenderTargetResource* RTResource = RenderTarget->GameThread_GetRenderTargetResource();
+	if (RTResource)
+	{
+		RTResource->ReadPixels(Pixels);
+	}
+
+	// Save to file
+	FString OutputDir = FPaths::ProjectSavedDir() / TEXT("MCP_Previews");
+	IFileManager::Get().MakeDirectory(*OutputDir, true);
+	FString FileName = FString::Printf(TEXT("socket_preview_%s_%s.png"), *SocketName, *FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S")));
+	FString FullPath = OutputDir / FileName;
+
+	if (Pixels.Num() > 0)
+	{
+		TArray64<uint8> PNGData;
+		FImageUtils::PNGCompressImageArray(Resolution, Resolution, Pixels, PNGData);
+		FFileHelper::SaveArrayToFile(PNGData, *FullPath);
+	}
+
+	// Cleanup temp actors
+	TempActor->Destroy();
+
+	TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
+	Result->SetBoolField(TEXT("success"), Pixels.Num() > 0);
+	Result->SetStringField(TEXT("saved_path"), FullPath);
+	Result->SetStringField(TEXT("socket_name"), SocketName);
+	Result->SetStringField(TEXT("mesh_path"), MeshPath);
+	Result->SetNumberField(TEXT("resolution"), Resolution);
 
 	return Result;
 }

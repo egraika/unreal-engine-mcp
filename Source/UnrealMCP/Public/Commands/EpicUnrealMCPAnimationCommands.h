@@ -26,6 +26,7 @@ private:
 	TSharedPtr<FJsonObject> HandleRemoveSocket(const TSharedPtr<FJsonObject>& Params);
 	TSharedPtr<FJsonObject> HandlePreviewMeshOnSocket(const TSharedPtr<FJsonObject>& Params);
 	TSharedPtr<FJsonObject> HandleClearSocketPreview(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleCaptureSocketPreview(const TSharedPtr<FJsonObject>& Params);
 
 	// Preview mesh tracking for cleanup
 	TMap<FString, TArray<TWeakObjectPtr<AActor>>> PreviewActors;

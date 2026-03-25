@@ -4,6 +4,9 @@
 
 #include "EditorAssetLibrary.h"
 #include "WidgetBlueprint.h"
+#include "WidgetBlueprintFactory.h"
+#include "AssetToolsModule.h"
+#include "IAssetTools.h"
 #include "Blueprint/WidgetTree.h"
 #include "Components/Widget.h"
 #include "Components/PanelWidget.h"
@@ -34,6 +37,10 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPWidgetCommands::HandleCommand(const FStrin
 	else if (CommandType == TEXT("get_widget_details"))
 	{
 		return HandleGetWidgetDetails(Params);
+	}
+	else if (CommandType == TEXT("create_widget_blueprint"))
+	{
+		return HandleCreateWidgetBlueprint(Params);
 	}
 
 	return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Unknown Widget command: %s"), *CommandType));
@@ -408,4 +415,93 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPWidgetCommands::SerializeWidget(UWidget* W
 	}
 
 	return WidgetObj;
+}
+
+// ============================================================================
+// create_widget_blueprint — Create a new Widget Blueprint (UMG)
+// ============================================================================
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPWidgetCommands::HandleCreateWidgetBlueprint(const TSharedPtr<FJsonObject>& Params)
+{
+	FString WidgetName;
+	if (!Params->TryGetStringField(TEXT("name"), WidgetName))
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'name' parameter"));
+	}
+
+	FString PackagePath = TEXT("/Game/Blueprints/Widgets/");
+	if (Params->HasField(TEXT("path")))
+	{
+		PackagePath = Params->GetStringField(TEXT("path"));
+		if (!PackagePath.EndsWith(TEXT("/")))
+		{
+			PackagePath += TEXT("/");
+		}
+	}
+
+	// Check if already exists
+	FString FullPath = PackagePath + WidgetName;
+	if (UEditorAssetLibrary::DoesAssetExist(FullPath))
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Widget Blueprint already exists: %s"), *FullPath));
+	}
+
+	// Resolve parent class (default: UUserWidget)
+	UClass* ParentClass = UUserWidget::StaticClass();
+	FString ParentClassName;
+	if (Params->TryGetStringField(TEXT("parent_class"), ParentClassName) && !ParentClassName.IsEmpty())
+	{
+		// Try to find the class by name
+		UClass* FoundClass = FindObject<UClass>(ANY_PACKAGE, *ParentClassName);
+		if (!FoundClass)
+		{
+			// Try with U prefix
+			FoundClass = FindObject<UClass>(ANY_PACKAGE, *(TEXT("U") + ParentClassName));
+		}
+		if (!FoundClass)
+		{
+			// Try loading by path
+			FoundClass = LoadClass<UUserWidget>(nullptr, *ParentClassName);
+		}
+		if (FoundClass && FoundClass->IsChildOf(UUserWidget::StaticClass()))
+		{
+			ParentClass = FoundClass;
+		}
+		else if (FoundClass)
+		{
+			return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Parent class '%s' is not a UUserWidget subclass"), *ParentClassName));
+		}
+		else
+		{
+			return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Parent class not found: %s"), *ParentClassName));
+		}
+	}
+
+	// Create widget blueprint via factory
+	UWidgetBlueprintFactory* Factory = NewObject<UWidgetBlueprintFactory>();
+	Factory->ParentClass = ParentClass;
+
+	IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
+	UObject* CreatedAsset = AssetTools.CreateAsset(WidgetName, PackagePath, UWidgetBlueprint::StaticClass(), Factory);
+
+	if (!CreatedAsset)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to create Widget Blueprint"));
+	}
+
+	UWidgetBlueprint* WidgetBP = Cast<UWidgetBlueprint>(CreatedAsset);
+	if (!WidgetBP)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Created asset is not a Widget Blueprint"));
+	}
+
+	// Save the asset
+	UEditorAssetLibrary::SaveAsset(CreatedAsset->GetPathName());
+
+	TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
+	Result->SetBoolField(TEXT("success"), true);
+	Result->SetStringField(TEXT("name"), WidgetName);
+	Result->SetStringField(TEXT("path"), CreatedAsset->GetPathName());
+	Result->SetStringField(TEXT("parent_class"), ParentClass->GetName());
+	return Result;
 }

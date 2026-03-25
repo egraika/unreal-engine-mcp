@@ -326,7 +326,8 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
                      CommandType == TEXT("modify_socket") ||
                      CommandType == TEXT("remove_socket") ||
                      CommandType == TEXT("preview_mesh_on_socket") ||
-                     CommandType == TEXT("clear_socket_preview"))
+                     CommandType == TEXT("clear_socket_preview") ||
+                     CommandType == TEXT("capture_socket_preview"))
             {
                 ResultJson = AnimationCommands->HandleCommand(CommandType, Params);
             }
@@ -355,7 +356,8 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
             }
             // Widget Commands
             else if (CommandType == TEXT("analyze_widget_blueprint") ||
-                     CommandType == TEXT("get_widget_details"))
+                     CommandType == TEXT("get_widget_details") ||
+                     CommandType == TEXT("create_widget_blueprint"))
             {
                 ResultJson = WidgetCommands->HandleCommand(CommandType, Params);
             }
