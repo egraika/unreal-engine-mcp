@@ -1406,7 +1406,23 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleAnalyzeBlueprintG
                         PinObj->SetStringField(TEXT("type"), Pin->PinType.PinCategory.ToString());
                         PinObj->SetStringField(TEXT("direction"), Pin->Direction == EGPD_Input ? TEXT("Input") : TEXT("Output"));
                         PinObj->SetNumberField(TEXT("connections"), Pin->LinkedTo.Num());
-                        
+
+                        // Emit default values for unconnected input pins
+                        if (Pin->Direction == EGPD_Input && Pin->LinkedTo.Num() == 0)
+                        {
+                            FString DefaultStr = Pin->GetDefaultAsString();
+                            if (!DefaultStr.IsEmpty())
+                            {
+                                PinObj->SetStringField(TEXT("default_value"), DefaultStr);
+                            }
+                        }
+
+                        // Emit pin sub-type (struct/class) if present
+                        if (Pin->PinType.PinSubCategoryObject.IsValid())
+                        {
+                            PinObj->SetStringField(TEXT("sub_type"), Pin->PinType.PinSubCategoryObject->GetName());
+                        }
+
                         // Record connections for this pin
                         for (UEdGraphPin* LinkedPin : Pin->LinkedTo)
                         {
@@ -1679,7 +1695,67 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleGetMaterialInstan
 			ResultObj->SetBoolField(TEXT("success"), true);
 			ResultObj->SetStringField(TEXT("material_path"), MaterialPath);
 			ResultObj->SetBoolField(TEXT("is_material_instance"), false);
-			ResultObj->SetStringField(TEXT("note"), TEXT("This is a base Material, not a Material Instance. Parameter values are defined in the material graph."));
+			ResultObj->SetStringField(TEXT("note"), TEXT("This is a base Material. Showing parameter names available for Material Instances to override."));
+
+			// Scalar parameters
+			{
+				TArray<FMaterialParameterInfo> ParamInfos;
+				TArray<FGuid> ParamGuids;
+				BaseMat->GetAllScalarParameterInfo(ParamInfos, ParamGuids);
+				TArray<TSharedPtr<FJsonValue>> ScalarArray;
+				for (const FMaterialParameterInfo& Info : ParamInfos)
+				{
+					TSharedPtr<FJsonObject> ParamObj = MakeShared<FJsonObject>();
+					ParamObj->SetStringField(TEXT("name"), Info.Name.ToString());
+					float DefaultValue = 0.f;
+					BaseMat->GetScalarParameterValue(Info, DefaultValue);
+					ParamObj->SetNumberField(TEXT("default_value"), DefaultValue);
+					ScalarArray.Add(MakeShared<FJsonValueObject>(ParamObj));
+				}
+				ResultObj->SetArrayField(TEXT("scalar_parameters"), ScalarArray);
+			}
+
+			// Vector parameters
+			{
+				TArray<FMaterialParameterInfo> ParamInfos;
+				TArray<FGuid> ParamGuids;
+				BaseMat->GetAllVectorParameterInfo(ParamInfos, ParamGuids);
+				TArray<TSharedPtr<FJsonValue>> VectorArray;
+				for (const FMaterialParameterInfo& Info : ParamInfos)
+				{
+					TSharedPtr<FJsonObject> ParamObj = MakeShared<FJsonObject>();
+					ParamObj->SetStringField(TEXT("name"), Info.Name.ToString());
+					FLinearColor DefaultValue = FLinearColor::Black;
+					BaseMat->GetVectorParameterValue(Info, DefaultValue);
+					TArray<TSharedPtr<FJsonValue>> ColorValues;
+					ColorValues.Add(MakeShared<FJsonValueNumber>(DefaultValue.R));
+					ColorValues.Add(MakeShared<FJsonValueNumber>(DefaultValue.G));
+					ColorValues.Add(MakeShared<FJsonValueNumber>(DefaultValue.B));
+					ColorValues.Add(MakeShared<FJsonValueNumber>(DefaultValue.A));
+					ParamObj->SetArrayField(TEXT("default_value"), ColorValues);
+					VectorArray.Add(MakeShared<FJsonValueObject>(ParamObj));
+				}
+				ResultObj->SetArrayField(TEXT("vector_parameters"), VectorArray);
+			}
+
+			// Texture parameters
+			{
+				TArray<FMaterialParameterInfo> ParamInfos;
+				TArray<FGuid> ParamGuids;
+				BaseMat->GetAllTextureParameterInfo(ParamInfos, ParamGuids);
+				TArray<TSharedPtr<FJsonValue>> TextureArray;
+				for (const FMaterialParameterInfo& Info : ParamInfos)
+				{
+					TSharedPtr<FJsonObject> ParamObj = MakeShared<FJsonObject>();
+					ParamObj->SetStringField(TEXT("name"), Info.Name.ToString());
+					UTexture* TexValue = nullptr;
+					BaseMat->GetTextureParameterValue(Info, TexValue);
+					ParamObj->SetStringField(TEXT("default_value"), TexValue ? TexValue->GetPathName() : TEXT("None"));
+					TextureArray.Add(MakeShared<FJsonValueObject>(ParamObj));
+				}
+				ResultObj->SetArrayField(TEXT("texture_parameters"), TextureArray);
+			}
+
 			return ResultObj;
 		}
 		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Asset is not a Material or MaterialInstance: %s"), *MaterialPath));

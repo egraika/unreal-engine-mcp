@@ -327,13 +327,31 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
                      CommandType == TEXT("remove_socket") ||
                      CommandType == TEXT("preview_mesh_on_socket") ||
                      CommandType == TEXT("clear_socket_preview") ||
-                     CommandType == TEXT("capture_socket_preview"))
+                     CommandType == TEXT("capture_socket_preview") ||
+                     CommandType == TEXT("create_anim_montage") ||
+                     CommandType == TEXT("add_montage_section") ||
+                     CommandType == TEXT("remove_montage_section") ||
+                     CommandType == TEXT("set_montage_section_link") ||
+                     CommandType == TEXT("add_montage_notify") ||
+                     CommandType == TEXT("remove_montage_notify") ||
+                     CommandType == TEXT("add_montage_segment") ||
+                     CommandType == TEXT("set_montage_blend_times") ||
+                     CommandType == TEXT("get_anim_curve_keys") ||
+                     CommandType == TEXT("add_anim_curve") ||
+                     CommandType == TEXT("set_anim_curve_keys") ||
+                     CommandType == TEXT("remove_anim_curve") ||
+                     CommandType == TEXT("get_root_motion_data") ||
+                     CommandType == TEXT("batch_add_speed_curves") ||
+                     CommandType == TEXT("create_mirror_data_table") ||
+                     CommandType == TEXT("analyze_mirror_data_table"))
             {
                 ResultJson = AnimationCommands->HandleCommand(CommandType, Params);
             }
             // Data Asset Commands
             else if (CommandType == TEXT("read_data_asset") ||
-                     CommandType == TEXT("list_data_assets"))
+                     CommandType == TEXT("list_data_assets") ||
+                     CommandType == TEXT("create_data_asset") ||
+                     CommandType == TEXT("update_data_asset"))
             {
                 ResultJson = DataAssetCommands->HandleCommand(CommandType, Params);
             }

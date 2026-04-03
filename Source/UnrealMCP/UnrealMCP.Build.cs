@@ -45,7 +45,8 @@ public class UnrealMCP : ModuleRules
 				"UnrealEd",           // For Blueprint editing
 				"BlueprintGraph",     // For K2Node classes (F15-F22)
 				"KismetCompiler",     // For Blueprint compilation (F15-F22)
-				"AnimGraph"           // For AnimGraphNode_StateMachine (AnimBP commands)
+				"AnimGraph",          // For AnimGraphNode_StateMachine (AnimBP commands)
+				"GameplayTags"        // For FGameplayTag property support
 			}
 		);
 		

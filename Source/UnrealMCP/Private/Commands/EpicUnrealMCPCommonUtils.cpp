@@ -1,4 +1,5 @@
 #include "Commands/EpicUnrealMCPCommonUtils.h"
+#include "GameplayTagContainer.h"
 #include "GameFramework/Actor.h"
 #include "Engine/Blueprint.h"
 #include "EdGraph/EdGraph.h"
@@ -749,7 +750,217 @@ bool FEpicUnrealMCPCommonUtils::SetObjectProperty(UObject* Object, const FString
         }
     }
     
-    OutErrorMessage = FString::Printf(TEXT("Unsupported property type: %s for property %s"), 
+    // Handle FArrayProperty (TArray<T>) — accepts JSON arrays
+    if (Property->IsA<FArrayProperty>())
+    {
+        FArrayProperty* ArrayProp = CastField<FArrayProperty>(Property);
+        if (!ArrayProp || Value->Type != EJson::Array)
+        {
+            OutErrorMessage = FString::Printf(TEXT("Array property %s requires a JSON array"), *PropertyName);
+            return false;
+        }
+
+        const TArray<TSharedPtr<FJsonValue>>& JsonArray = Value->AsArray();
+        FScriptArrayHelper ArrayHelper(ArrayProp, PropertyAddr);
+        ArrayHelper.EmptyValues();
+
+        FProperty* InnerProp = ArrayProp->Inner;
+        int32 SetCount = 0;
+
+        for (int32 Idx = 0; Idx < JsonArray.Num(); ++Idx)
+        {
+            const int32 NewIdx = ArrayHelper.AddValue();
+            void* ElementAddr = ArrayHelper.GetRawPtr(NewIdx);
+
+            // Inner: soft object reference (TSoftObjectPtr)
+            if (InnerProp->IsA<FSoftObjectProperty>() && JsonArray[Idx]->Type == EJson::String)
+            {
+                FSoftObjectProperty* SoftInner = CastField<FSoftObjectProperty>(InnerProp);
+                if (SoftInner)
+                {
+                    FSoftObjectPath SoftPath(JsonArray[Idx]->AsString());
+                    SoftInner->SetPropertyValue(ElementAddr, FSoftObjectPtr(SoftPath));
+                    SetCount++;
+                }
+            }
+            // Inner: string
+            else if (InnerProp->IsA<FStrProperty>() && JsonArray[Idx]->Type == EJson::String)
+            {
+                CastField<FStrProperty>(InnerProp)->SetPropertyValue(ElementAddr, JsonArray[Idx]->AsString());
+                SetCount++;
+            }
+            // Inner: float
+            else if (InnerProp->IsA<FFloatProperty>() && JsonArray[Idx]->Type == EJson::Number)
+            {
+                CastField<FFloatProperty>(InnerProp)->SetPropertyValue(ElementAddr, JsonArray[Idx]->AsNumber());
+                SetCount++;
+            }
+            // Inner: int
+            else if (InnerProp->IsA<FIntProperty>() && JsonArray[Idx]->Type == EJson::Number)
+            {
+                CastField<FIntProperty>(InnerProp)->SetPropertyValue(ElementAddr, static_cast<int32>(JsonArray[Idx]->AsNumber()));
+                SetCount++;
+            }
+        }
+
+        UE_LOG(LogTemp, Display, TEXT("Set array property %s: %d/%d elements"), *PropertyName, SetCount, JsonArray.Num());
+        return SetCount > 0;
+    }
+
+    // Handle FSoftObjectProperty (TSoftObjectPtr<T>) — accepts string asset paths
+    if (Property->IsA<FSoftObjectProperty>())
+    {
+        if (Value->Type == EJson::String)
+        {
+            const FString AssetPath = Value->AsString();
+            FSoftObjectPath SoftPath(AssetPath);
+            FSoftObjectProperty* SoftProp = CastField<FSoftObjectProperty>(Property);
+            if (SoftProp)
+            {
+                SoftProp->SetPropertyValue_InContainer(Object, FSoftObjectPtr(SoftPath));
+                UE_LOG(LogTemp, Display, TEXT("Setting soft object property %s to: %s"), *PropertyName, *AssetPath);
+                return true;
+            }
+        }
+        else if (Value->Type == EJson::Null)
+        {
+            FSoftObjectProperty* SoftProp = CastField<FSoftObjectProperty>(Property);
+            if (SoftProp)
+            {
+                SoftProp->SetPropertyValue_InContainer(Object, FSoftObjectPtr());
+                return true;
+            }
+        }
+        OutErrorMessage = FString::Printf(TEXT("Soft object property %s requires a string asset path"), *PropertyName);
+        return false;
+    }
+
+    // FName property
+    if (Property->IsA<FNameProperty>())
+    {
+        CastField<FNameProperty>(Property)->SetPropertyValue(PropertyAddr, FName(*Value->AsString()));
+        return true;
+    }
+    // FText property
+    if (Property->IsA<FTextProperty>())
+    {
+        CastField<FTextProperty>(Property)->SetPropertyValue(PropertyAddr, FText::FromString(Value->AsString()));
+        return true;
+    }
+    // Hard object reference (TObjectPtr, UObject*)
+    if (FObjectPropertyBase* ObjProp = CastField<FObjectPropertyBase>(Property))
+    {
+        FString AssetPath = Value->AsString();
+        if (AssetPath.IsEmpty() || AssetPath == TEXT("None") || AssetPath == TEXT("null"))
+        {
+            ObjProp->SetObjectPropertyValue(PropertyAddr, nullptr);
+            return true;
+        }
+        UObject* LoadedObj = StaticLoadObject(ObjProp->PropertyClass, nullptr, *AssetPath);
+        if (LoadedObj)
+        {
+            ObjProp->SetObjectPropertyValue(PropertyAddr, LoadedObj);
+            return true;
+        }
+        OutErrorMessage = FString::Printf(TEXT("Failed to load object: %s"), *AssetPath);
+        return false;
+    }
+
+    // Handle FStructProperty — special-case common types, then recurse, then ImportText fallback
+    if (const FStructProperty* StructProp = CastField<FStructProperty>(Property))
+    {
+        const FName StructName = StructProp->Struct->GetFName();
+
+        // FSoftObjectPath — accepts string path
+        static const FName NAME_SoftObjectPath(TEXT("SoftObjectPath"));
+        if (StructName == NAME_SoftObjectPath && Value->Type == EJson::String)
+        {
+            *static_cast<FSoftObjectPath*>(PropertyAddr) = FSoftObjectPath(Value->AsString());
+            return true;
+        }
+
+        // FGameplayTag — accepts string tag name
+        static const FName NAME_GameplayTag(TEXT("GameplayTag"));
+        if (StructName == NAME_GameplayTag && Value->Type == EJson::String)
+        {
+            *static_cast<FGameplayTag*>(PropertyAddr) = FGameplayTag::RequestGameplayTag(FName(*Value->AsString()), false);
+            return true;
+        }
+
+        // JSON object: recurse into struct fields
+        if (Value->Type == EJson::Object)
+        {
+            const TSharedPtr<FJsonObject> StructObj = Value->AsObject();
+            if (StructObj.IsValid())
+            {
+                bool bAnySet = false;
+                TArray<FString> StructErrors;
+                for (const auto& FieldPair : StructObj->Values)
+                {
+                    FProperty* SubProperty = StructProp->Struct->FindPropertyByName(*FieldPair.Key);
+                    if (!SubProperty)
+                    {
+                        StructErrors.Add(FString::Printf(TEXT("Sub-property not found: %s.%s"), *PropertyName, *FieldPair.Key));
+                        continue;
+                    }
+
+                    void* SubPropertyAddr = SubProperty->ContainerPtrToValuePtr<void>(PropertyAddr);
+
+                    // Handle soft object refs inside structs
+                    if (SubProperty->IsA<FSoftObjectProperty>() && FieldPair.Value->Type == EJson::String)
+                    {
+                        FSoftObjectProperty* SoftProp = CastField<FSoftObjectProperty>(SubProperty);
+                        if (SoftProp)
+                        {
+                            FSoftObjectPath SoftPath(FieldPair.Value->AsString());
+                            SoftProp->SetPropertyValue(SubPropertyAddr, FSoftObjectPtr(SoftPath));
+                            bAnySet = true;
+                        }
+                    }
+                    else if (SubProperty->IsA<FFloatProperty>() && FieldPair.Value->Type == EJson::Number)
+                    {
+                        CastField<FFloatProperty>(SubProperty)->SetPropertyValue(SubPropertyAddr, FieldPair.Value->AsNumber());
+                        bAnySet = true;
+                    }
+                    else
+                    {
+                        StructErrors.Add(FString::Printf(TEXT("Unsupported sub-property type: %s.%s"), *PropertyName, *FieldPair.Key));
+                    }
+                }
+                if (bAnySet) return true;
+                if (StructErrors.Num() > 0)
+                {
+                    OutErrorMessage = FString::Join(StructErrors, TEXT("; "));
+                    return false;
+                }
+            }
+        }
+
+        // ImportText fallback for structs
+        if (Value->Type == EJson::String)
+        {
+            const TCHAR* ImportResult = Property->ImportText_Direct(*Value->AsString(), PropertyAddr, Object, PPF_None);
+            if (ImportResult)
+            {
+                return true;
+            }
+        }
+
+        OutErrorMessage = FString::Printf(TEXT("Struct property %s: could not set value"), *PropertyName);
+        return false;
+    }
+
+    // Universal fallback: ImportText
+    if (Value->Type == EJson::String)
+    {
+        const TCHAR* ImportResult = Property->ImportText_Direct(*Value->AsString(), PropertyAddr, Object, PPF_None);
+        if (ImportResult)
+        {
+            return true;
+        }
+    }
+
+    OutErrorMessage = FString::Printf(TEXT("Unsupported property type: %s for property %s"),
                                     *Property->GetClass()->GetName(), *PropertyName);
     return false;
 } 

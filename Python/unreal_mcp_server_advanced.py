@@ -1454,6 +1454,84 @@ def get_actor_material_info(
         return {"success": False, "message": str(e)}
 
 @mcp.tool()
+def get_material_instance_parameters(
+    material_path: str
+) -> Dict[str, Any]:
+    """
+    Get all parameters from a Material Instance or base Material.
+
+    Returns scalar, vector, texture, and static switch parameters with their
+    current values and override status. For base Materials (not instances),
+    returns the parameter names available for overriding with their defaults.
+
+    Args:
+        material_path: Full path to the Material or MaterialInstance asset
+            (e.g., "/Game/Materials/MI_Blood_Drip")
+
+    Returns:
+        Dictionary with parameter arrays: scalar_parameters, vector_parameters,
+        texture_parameters, static_switch_parameters, etc.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    try:
+        params = {"material_path": material_path}
+        logger.info(f"Getting material instance parameters: {material_path}")
+        response = unreal.send_command("get_material_instance_parameters", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"get_material_instance_parameters error: {e}")
+        return {"success": False, "message": str(e)}
+
+@mcp.tool()
+def set_material_instance_parameters(
+    material_path: str,
+    scalar_parameters: List[Dict[str, Any]] = None,
+    vector_parameters: List[Dict[str, Any]] = None,
+    texture_parameters: List[Dict[str, Any]] = None,
+    static_switch_parameters: List[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """
+    Set parameters on a MaterialInstanceConstant asset.
+
+    Only works with MaterialInstanceConstant assets (not base Materials or MIDs).
+    Each parameter entry needs a "name" and "value" field.
+
+    Args:
+        material_path: Full path to the MaterialInstanceConstant asset
+        scalar_parameters: List of {"name": str, "value": float} dicts
+        vector_parameters: List of {"name": str, "value": [R, G, B, A]} dicts
+        texture_parameters: List of {"name": str, "value": "/Game/path"} dicts
+        static_switch_parameters: List of {"name": str, "value": bool} dicts
+
+    Returns:
+        Dictionary with counts of parameters set and any errors
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    try:
+        params = {"material_path": material_path}
+        if scalar_parameters:
+            params["scalar_parameters"] = scalar_parameters
+        if vector_parameters:
+            params["vector_parameters"] = vector_parameters
+        if texture_parameters:
+            params["texture_parameters"] = texture_parameters
+        if static_switch_parameters:
+            params["static_switch_parameters"] = static_switch_parameters
+
+        logger.info(f"Setting material instance parameters: {material_path}")
+        response = unreal.send_command("set_material_instance_parameters", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"set_material_instance_parameters error: {e}")
+        return {"success": False, "message": str(e)}
+
+@mcp.tool()
 def set_mesh_material_color(
     blueprint_name: str,
     component_name: str,
@@ -3023,6 +3101,600 @@ def capture_socket_preview(
         return {"success": False, "message": str(e)}
 
 
+# =============================================================================
+# Animation Montage & Sequence Tools
+# =============================================================================
+
+@mcp.tool()
+def analyze_anim_montage(asset_path: str) -> Dict[str, Any]:
+    """Analyze a UAnimMontage asset and return its sections, slots, notifies, blend times, and play length.
+
+    Args:
+        asset_path: Full asset path to the AnimMontage (e.g., "/Game/Animations/AM_Attack_Slash")
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("analyze_anim_montage", {
+            "asset_path": asset_path
+        })
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"analyze_anim_montage error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def analyze_anim_sequence(asset_path: str) -> Dict[str, Any]:
+    """Analyze a UAnimSequence asset and return its play length, frame rate, bone tracks, curves, and notifies.
+
+    Args:
+        asset_path: Full asset path to the AnimSequence (e.g., "/Game/Animations/AS_Walk_Forward")
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("analyze_anim_sequence", {
+            "asset_path": asset_path
+        })
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"analyze_anim_sequence error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def list_animation_assets(
+    directory: str = "/Game/",
+    limit: int = 100
+) -> Dict[str, Any]:
+    """List UAnimMontage, UAnimSequence, and UBlendSpace assets in a directory.
+
+    Args:
+        directory: Content Browser folder path to search (default: "/Game/")
+        limit: Maximum number of results to return (default: 100)
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("list_animation_assets", {
+            "directory": directory,
+            "limit": limit
+        })
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"list_animation_assets error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def create_anim_montage(
+    name: str,
+    skeleton_path: str,
+    source_animation: str = "",
+    slot_name: str = "DefaultSlot",
+    package_path: str = "/Game/Animations/",
+    blend_in_time: float = 0.25,
+    blend_out_time: float = 0.25
+) -> Dict[str, Any]:
+    """Create a new UAnimMontage asset, optionally from an existing AnimSequence.
+
+    Args:
+        name: Asset name for the new montage (e.g., "AM_Attack_Slash")
+        skeleton_path: Path to skeleton or skeletal mesh (e.g., "/Game/Characters/SK_Mannequin")
+        source_animation: Optional path to AnimSequence to use as initial segment
+        slot_name: Animation slot name (default: "DefaultSlot")
+        package_path: Content Browser folder (default: "/Game/Animations/")
+        blend_in_time: Blend in duration in seconds (default: 0.25)
+        blend_out_time: Blend out duration in seconds (default: 0.25)
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {
+            "name": name,
+            "skeleton_path": skeleton_path,
+            "slot_name": slot_name,
+            "package_path": package_path,
+            "blend_in_time": blend_in_time,
+            "blend_out_time": blend_out_time
+        }
+        if source_animation:
+            params["source_animation"] = source_animation
+        response = unreal.send_command("create_anim_montage", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"create_anim_montage error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def add_montage_section(
+    asset_path: str,
+    section_name: str,
+    start_time: float,
+    next_section_name: str = ""
+) -> Dict[str, Any]:
+    """Add a composite section to an AnimMontage.
+
+    Args:
+        asset_path: Path to the AnimMontage asset
+        section_name: Name for the new section (e.g., "Loop", "Recovery")
+        start_time: Start time in seconds within the montage
+        next_section_name: Optional name of the section to play after this one
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {
+            "asset_path": asset_path,
+            "section_name": section_name,
+            "start_time": start_time
+        }
+        if next_section_name:
+            params["next_section_name"] = next_section_name
+        response = unreal.send_command("add_montage_section", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"add_montage_section error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def remove_montage_section(
+    asset_path: str,
+    section_name: str
+) -> Dict[str, Any]:
+    """Remove a composite section from an AnimMontage by name.
+
+    Args:
+        asset_path: Path to the AnimMontage asset
+        section_name: Name of the section to remove
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("remove_montage_section", {
+            "asset_path": asset_path,
+            "section_name": section_name
+        })
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"remove_montage_section error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def set_montage_section_link(
+    asset_path: str,
+    section_name: str,
+    next_section_name: str
+) -> Dict[str, Any]:
+    """Link two montage sections so one flows into the other.
+
+    Args:
+        asset_path: Path to the AnimMontage asset
+        section_name: Source section name
+        next_section_name: Section to play after source completes (use "None" to unlink)
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("set_montage_section_link", {
+            "asset_path": asset_path,
+            "section_name": section_name,
+            "next_section_name": next_section_name
+        })
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"set_montage_section_link error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def add_montage_notify(
+    asset_path: str,
+    notify_name: str,
+    trigger_time: float,
+    duration: float = 0.0,
+    notify_class: str = "",
+    track_index: int = 0
+) -> Dict[str, Any]:
+    """Add an animation notify event to a montage.
+
+    If duration > 0, creates a state notify (has both start and end events).
+    If notify_class is specified, creates a typed notify instance.
+
+    Args:
+        asset_path: Path to the AnimMontage asset
+        notify_name: Name for the notify (e.g., "HitWindow", "PlaySound")
+        trigger_time: Time in seconds when the notify fires
+        duration: Duration in seconds for state notifies (0 = instant notify)
+        notify_class: Optional UAnimNotify or UAnimNotifyState class name
+        track_index: Notify track index (default: 0)
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {
+            "asset_path": asset_path,
+            "notify_name": notify_name,
+            "trigger_time": trigger_time,
+            "track_index": track_index
+        }
+        if duration > 0:
+            params["duration"] = duration
+        if notify_class:
+            params["notify_class"] = notify_class
+        response = unreal.send_command("add_montage_notify", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"add_montage_notify error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def remove_montage_notify(
+    asset_path: str,
+    notify_name: str = "",
+    notify_index: int = -1
+) -> Dict[str, Any]:
+    """Remove a notify from a montage by name or index.
+
+    Provide either notify_name or notify_index (not both needed).
+
+    Args:
+        asset_path: Path to the AnimMontage asset
+        notify_name: Name of the notify to remove (first match)
+        notify_index: Index of the notify in the Notifies array
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {"asset_path": asset_path}
+        if notify_name:
+            params["notify_name"] = notify_name
+        if notify_index >= 0:
+            params["notify_index"] = notify_index
+        response = unreal.send_command("remove_montage_notify", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"remove_montage_notify error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def add_montage_segment(
+    asset_path: str,
+    animation_path: str,
+    slot_index: int = 0,
+    start_pos: float = 0.0,
+    anim_start_time: float = 0.0,
+    anim_end_time: float = -1.0,
+    play_rate: float = 1.0
+) -> Dict[str, Any]:
+    """Add an animation segment to a slot track on a montage.
+
+    Args:
+        asset_path: Path to the AnimMontage asset
+        animation_path: Path to the AnimSequence to add as a segment
+        slot_index: Index of the slot track (default: 0)
+        start_pos: Position in the montage timeline where the segment starts
+        anim_start_time: Start time within the source animation
+        anim_end_time: End time within the source animation (-1 = use full length)
+        play_rate: Playback rate (default: 1.0)
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {
+            "asset_path": asset_path,
+            "animation_path": animation_path,
+            "slot_index": slot_index,
+            "start_pos": start_pos,
+            "anim_start_time": anim_start_time,
+            "play_rate": play_rate
+        }
+        if anim_end_time >= 0:
+            params["anim_end_time"] = anim_end_time
+        response = unreal.send_command("add_montage_segment", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"add_montage_segment error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def set_montage_blend_times(
+    asset_path: str,
+    blend_in_time: float = -1.0,
+    blend_out_time: float = -1.0
+) -> Dict[str, Any]:
+    """Set blend in/out times on an existing montage.
+
+    Only provided values are updated.
+
+    Args:
+        asset_path: Path to the AnimMontage asset
+        blend_in_time: New blend in time in seconds (-1 = leave unchanged)
+        blend_out_time: New blend out time in seconds (-1 = leave unchanged)
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {"asset_path": asset_path}
+        if blend_in_time >= 0:
+            params["blend_in_time"] = blend_in_time
+        if blend_out_time >= 0:
+            params["blend_out_time"] = blend_out_time
+        response = unreal.send_command("set_montage_blend_times", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"set_montage_blend_times error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+# ============================================================
+# Animation Curve & Root Motion Tools
+# ============================================================
+
+@mcp.tool()
+def get_anim_curve_keys(asset_path: str, curve_name: str) -> Dict[str, Any]:
+    """Read all keyframes from a named float curve on an animation sequence.
+
+    Returns each key's time, value, interpolation mode, and tangent data.
+
+    Args:
+        asset_path: Full asset path to the AnimSequence (e.g., "/Game/Animations/AS_Walk")
+        curve_name: Name of the float curve to read (e.g., "Speed")
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("get_anim_curve_keys", {
+            "asset_path": asset_path,
+            "curve_name": curve_name
+        })
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"get_anim_curve_keys error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def get_root_motion_data(asset_path: str, num_samples: int = 10) -> Dict[str, Any]:
+    """Extract root motion translation data from an animation sequence.
+
+    Returns total distance, average speed (distance/playLength), and optional
+    per-sample distance curve. Useful for calculating Speed curve values for
+    stride warping systems (StrideWarpRatio = ActualGroundSpeed / SpeedCurveValue).
+
+    Args:
+        asset_path: Full asset path to the AnimSequence
+        num_samples: Number of evenly-spaced samples for the distance curve (default: 10)
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("get_root_motion_data", {
+            "asset_path": asset_path,
+            "num_samples": num_samples
+        })
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"get_root_motion_data error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def add_anim_curve(
+    asset_path: str,
+    curve_name: str,
+    keys: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Add a new named float curve with keyframes to an animation sequence.
+
+    Creates a new curve. Fails if the curve already exists (use set_anim_curve_keys
+    to modify existing curves).
+
+    For a constant Speed curve, use two keys:
+      [{"time": 0, "value": 150.0, "interp_mode": "Constant"},
+       {"time": 1.2, "value": 150.0, "interp_mode": "Constant"}]
+
+    Args:
+        asset_path: Full asset path to the AnimSequence
+        curve_name: Name for the new curve (e.g., "Speed")
+        keys: List of keyframe dicts, each with "time" (float), "value" (float),
+              and optional "interp_mode" ("Constant", "Linear", or "Cubic", default: "Linear")
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("add_anim_curve", {
+            "asset_path": asset_path,
+            "curve_name": curve_name,
+            "keys": keys
+        })
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"add_anim_curve error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def set_anim_curve_keys(
+    asset_path: str,
+    curve_name: str,
+    keys: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Replace all keyframes on an existing float curve of an animation sequence.
+
+    The curve must already exist. Use add_anim_curve to create new curves.
+
+    Args:
+        asset_path: Full asset path to the AnimSequence
+        curve_name: Name of the existing curve to modify
+        keys: List of keyframe dicts (same format as add_anim_curve)
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("set_anim_curve_keys", {
+            "asset_path": asset_path,
+            "curve_name": curve_name,
+            "keys": keys
+        })
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"set_anim_curve_keys error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def remove_anim_curve(asset_path: str, curve_name: str) -> Dict[str, Any]:
+    """Remove a named float curve from an animation sequence entirely.
+
+    Args:
+        asset_path: Full asset path to the AnimSequence
+        curve_name: Name of the curve to remove
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("remove_anim_curve", {
+            "asset_path": asset_path,
+            "curve_name": curve_name
+        })
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"remove_anim_curve error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def batch_add_speed_curves(
+    directory: str,
+    curve_name: str = "Speed",
+    overwrite: bool = True,
+    dry_run: bool = False
+) -> Dict[str, Any]:
+    """Batch-add Speed float curves to all animation sequences in a folder.
+
+    For each AnimSequence found:
+    1. Extracts root motion horizontal distance
+    2. Calculates Speed = distance / playLength
+    3. Adds/updates a constant float curve with that value
+
+    Designed for locomotion animations used with GMCE stride warping,
+    where StrideWarpRatio = ActualGroundSpeed / SpeedCurveValue.
+
+    Args:
+        directory: Content folder to scan (e.g., "/Game/PRK/Character/Anims/Locomotion/")
+        curve_name: Name of the speed curve (default: "Speed")
+        overwrite: If True, update existing curves. If False, skip them. (default: True)
+        dry_run: If True, report what would be done without modifying anything (default: False)
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("batch_add_speed_curves", {
+            "directory": directory,
+            "curve_name": curve_name,
+            "overwrite": overwrite,
+            "dry_run": dry_run
+        })
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"batch_add_speed_curves error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+# ============================================================
+# Mirror Data Table Tools
+# ============================================================
+
+@mcp.tool()
+def create_mirror_data_table(
+    asset_path: str,
+    skeleton_path: str,
+    expressions: Optional[List[Dict[str, str]]] = None,
+    mirror_axis: str = "X",
+    mirror_root_motion: bool = True
+) -> Dict[str, Any]:
+    """Create a Mirror Data Table asset for animation mirroring (left/right hand swap).
+
+    Auto-populates bone pair mappings from the skeleton using find/replace expressions.
+    Default expressions use _l/_r suffix convention (e.g., hand_l <-> hand_r).
+
+    Args:
+        asset_path: Where to create the asset (e.g., "/Game/PRK/Animation/MirrorTables/MDT_PRKSkeleton")
+        skeleton_path: Path to the USkeleton or USkeletalMesh asset
+        expressions: Optional list of find/replace dicts. Each dict has:
+            "find" (str), "replace" (str), "method" ("Prefix", "Suffix", or "Regex").
+            Default: [{"find": "_l", "replace": "_r", "method": "Suffix"},
+                      {"find": "_r", "replace": "_l", "method": "Suffix"}]
+        mirror_axis: Axis for mirroring ("X", "Y", or "Z", default: "X" for left/right)
+        mirror_root_motion: Whether to mirror root motion (default: True)
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {
+            "asset_path": asset_path,
+            "skeleton_path": skeleton_path,
+            "mirror_axis": mirror_axis,
+            "mirror_root_motion": mirror_root_motion
+        }
+        if expressions is not None:
+            params["expressions"] = expressions
+        response = unreal.send_command("create_mirror_data_table", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"create_mirror_data_table error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def analyze_mirror_data_table(asset_path: str) -> Dict[str, Any]:
+    """Analyze an existing Mirror Data Table asset.
+
+    Returns the skeleton, mirror axis, find/replace expressions, and all bone/curve/notify
+    pair mappings (rows).
+
+    Args:
+        asset_path: Full asset path to the UMirrorDataTable
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("analyze_mirror_data_table", {
+            "asset_path": asset_path
+        })
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"analyze_mirror_data_table error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # ============================================================
 # Widget Blueprint Tools
 # ============================================================
@@ -3298,6 +3970,81 @@ def create_widget_blueprint(
         return response or {"success": False, "message": "No response from Unreal"}
     except Exception as e:
         logger.error(f"create_widget_blueprint error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def create_data_asset(
+    data_asset_class: str,
+    name: str,
+    package_path: str = "/Game/Data/",
+    properties: Dict[str, Any] = {}
+) -> Dict[str, Any]:
+    """Create a new Data Asset instance of the specified class.
+
+    Creates a UDataAsset-derived asset in the Content Browser. Supports any
+    C++ class that extends UDataAsset or UPrimaryDataAsset, including project
+    classes like UPRKMoveset, UPRKItemData, UPRKWeaponData, etc.
+
+    Args:
+        data_asset_class: The C++ class to instantiate (e.g., "PRKMoveset",
+            "PRKWeaponData"). The "U" prefix is optional.
+        name: Asset name (e.g., "DA_Moveset_Sword", "DA_Item_IronOre")
+        package_path: Content Browser folder path (default: "/Game/Data/")
+        properties: Optional dict of UPROPERTY names to initial values.
+            Supports bool, int, float, string, enum, FName, FText,
+            soft/hard object references (pass asset path as string),
+            FGameplayTag (pass tag string), and structs (pass as dict).
+            Unsettable types will be reported as warnings.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {
+            "data_asset_class": data_asset_class,
+            "name": name,
+            "package_path": package_path,
+        }
+        if properties:
+            params["properties"] = properties
+        response = unreal.send_command("create_data_asset", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"create_data_asset error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def update_data_asset(
+    asset_path: str,
+    properties: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Update properties on an existing Data Asset.
+
+    Loads an existing DataAsset and sets the specified properties. Supports
+    scalar types (bool, int, float, string, enum), soft object references
+    (TSoftObjectPtr — pass asset path as string), and nested structs
+    (pass as dict with field names as keys).
+
+    Args:
+        asset_path: Full path to the existing DataAsset
+            (e.g., "/Game/PRK/Data/Combat/DA_PRKBloodVFXProfile")
+        properties: Dict of UPROPERTY names to values. For soft object refs,
+            use the full asset path string. For structs, use a nested dict.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        params = {
+            "asset_path": asset_path,
+            "properties": properties,
+        }
+        response = unreal.send_command("update_data_asset", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"update_data_asset error: {e}")
         return {"success": False, "message": str(e)}
 
 

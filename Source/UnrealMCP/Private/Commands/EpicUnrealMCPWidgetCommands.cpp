@@ -478,11 +478,11 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPWidgetCommands::HandleCreateWidgetBlueprin
 	if (Params->TryGetStringField(TEXT("parent_class"), ParentClassName) && !ParentClassName.IsEmpty())
 	{
 		// Try to find the class by name
-		UClass* FoundClass = FindObject<UClass>(ANY_PACKAGE, *ParentClassName);
+		UClass* FoundClass = FindFirstObject<UClass>(*ParentClassName, EFindFirstObjectOptions::EnsureIfAmbiguous);
 		if (!FoundClass)
 		{
 			// Try with U prefix
-			FoundClass = FindObject<UClass>(ANY_PACKAGE, *(TEXT("U") + ParentClassName));
+			FoundClass = FindFirstObject<UClass>(*(TEXT("U") + ParentClassName), EFindFirstObjectOptions::EnsureIfAmbiguous);
 		}
 		if (!FoundClass)
 		{
@@ -592,14 +592,47 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPWidgetCommands::HandleAddWidgetChild(const
 		{TEXT("RichTextBlock"), URichTextBlock::StaticClass()},
 	};
 
-	UClass* const* FoundClass = WidgetClassMap.Find(WidgetType);
-	if (!FoundClass)
+	UClass* WidgetClass = nullptr;
+	UClass* const* FoundBuiltinClass = WidgetClassMap.Find(WidgetType);
+	if (FoundBuiltinClass)
 	{
-		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Unknown widget type: %s. Supported: TextBlock, Image, Button, CanvasPanel, VerticalBox, HorizontalBox, Overlay, Border, ProgressBar, Spacer, SizeBox, CheckBox, Slider, ScrollBox, WidgetSwitcher, RichTextBlock"), *WidgetType));
+		WidgetClass = *FoundBuiltinClass;
+	}
+	else
+	{
+		// Try loading as a custom Widget Blueprint asset path (e.g., "/Game/PRK/UI/Widgets/MyWidget")
+		FString BlueprintPath = WidgetType;
+		if (!BlueprintPath.EndsWith(TEXT("_C")))
+		{
+			// Try loading as a Widget Blueprint and getting its generated class
+			UObject* LoadedBP = UEditorAssetLibrary::LoadAsset(BlueprintPath);
+			UWidgetBlueprint* CustomWBP = Cast<UWidgetBlueprint>(LoadedBP);
+			if (CustomWBP && CustomWBP->GeneratedClass)
+			{
+				WidgetClass = CustomWBP->GeneratedClass;
+			}
+		}
+
+		if (!WidgetClass)
+		{
+			// Try as a C++ class name
+			WidgetClass = FindFirstObject<UClass>(*WidgetType, EFindFirstObjectOptions::EnsureIfAmbiguous);
+			if (!WidgetClass)
+			{
+				WidgetClass = FindFirstObject<UClass>(*(TEXT("U") + WidgetType), EFindFirstObjectOptions::EnsureIfAmbiguous);
+			}
+		}
+
+		if (!WidgetClass || !WidgetClass->IsChildOf(UWidget::StaticClass()))
+		{
+			return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(
+				TEXT("Unknown widget type: %s. Use a built-in type (TextBlock, Image, Button, etc.), a C++ class name, or a Widget Blueprint asset path (/Game/...)"),
+				*WidgetType));
+		}
 	}
 
 	// Create the widget via WidgetTree (correct way — sets Outer and RF_Transactional)
-	UWidget* NewWidget = Tree->ConstructWidget<UWidget>(*FoundClass, FName(*WidgetName));
+	UWidget* NewWidget = Tree->ConstructWidget<UWidget>(WidgetClass, FName(*WidgetName));
 	if (!NewWidget)
 	{
 		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to construct widget"));
