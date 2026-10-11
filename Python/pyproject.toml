@@ -10,7 +10,9 @@ dependencies = [
   "uvicorn",
   "fastapi",
   "pydantic>=2.6.1",
-  "requests"
+  "requests",
+  "pillow",
+  "numpy>=2.2.6",
 ]
 
 [build-system]

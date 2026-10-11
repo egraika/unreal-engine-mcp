@@ -25,7 +25,9 @@ def delete_node(
     Args:
         unreal_connection: Connection to Unreal Engine
         blueprint_name: Name of the Blueprint to modify
-        node_id: ID of the node to delete (NodeGuid or GetName())
+        node_id: ID of the node to delete. Accepts the integer UniqueID
+            returned by read_anim_blueprint / analyze_blueprint_graph,
+            a NodeGuid hex string, or the node's GetName().
         function_name: Name of function graph (None = EventGraph)
 
     Returns:
