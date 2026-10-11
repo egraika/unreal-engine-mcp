@@ -52,7 +52,7 @@ TSharedPtr<FJsonObject> FBPVariables::CreateVariable(const TSharedPtr<FJsonObjec
 
         if (Params->HasField(TEXT("default_value")))
         {
-            SetDefaultValue(Variable, Params->Values.FindRef("default_value"));
+            SetDefaultValue(Variable, Params->Values.FindRef(TEXT("default_value")));
         }
 
         Blueprint->MarkPackageDirty();
@@ -132,11 +132,22 @@ TSharedPtr<FJsonObject> FBPVariables::SetVariableProperties(const TSharedPtr<FJs
     // Track which properties were updated
     TSharedPtr<FJsonObject> UpdatedProperties = MakeShared<FJsonObject>();
 
-    // Update var_name (rename variable)
+    // Update var_name (rename variable).
+    // NOTE: Must use FBlueprintEditorUtils::RenameMemberVariable so every
+    // K2Node_VariableGet / K2Node_VariableSet reference is patched. Direct
+    // assignment to VarDesc->VarName leaves those nodes pointing at the old
+    // name and causes silent compile failures / orphaned references.
     if (Params->HasField(TEXT("var_name")))
     {
         FString NewVarName = Params->GetStringField(TEXT("var_name"));
-        VarDesc->VarName = FName(*NewVarName);
+        const FName OldName = VarDesc->VarName;
+        const FName NewName(*NewVarName);
+        if (OldName != NewName)
+        {
+            FBlueprintEditorUtils::RenameMemberVariable(Blueprint, OldName, NewName);
+            // VarDesc pointer remains valid (RenameMemberVariable edits in place,
+            // no NewVariables reallocation), but VarName now reflects NewName.
+        }
         UpdatedProperties->SetStringField("var_name", NewVarName);
     }
 
@@ -289,7 +300,7 @@ TSharedPtr<FJsonObject> FBPVariables::SetVariableProperties(const TSharedPtr<FJs
     // Update default_value
     if (Params->HasField(TEXT("default_value")))
     {
-        SetDefaultValue(*VarDesc, Params->Values.FindRef("default_value"));
+        SetDefaultValue(*VarDesc, Params->Values.FindRef(TEXT("default_value")));
         UpdatedProperties->SetStringField("default_value", "updated");
     }
 
@@ -468,4 +479,50 @@ void FBPVariables::SetDefaultValue(FBPVariableDescription& Variable, const TShar
 
     // Update Variable.DefaultValue for Blueprint display
     Variable.DefaultValue = StringValue;
+}
+
+TSharedPtr<FJsonObject> FBPVariables::DeleteVariable(const TSharedPtr<FJsonObject>& Params)
+{
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+
+    FString BlueprintName = Params->GetStringField(TEXT("blueprint_name"));
+    FString VariableName = Params->GetStringField(TEXT("variable_name"));
+
+    UBlueprint* Blueprint = FEpicUnrealMCPCommonUtils::FindBlueprint(BlueprintName);
+    if (!Blueprint)
+    {
+        Result->SetBoolField("success", false);
+        Result->SetStringField("error", FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintName));
+        return Result;
+    }
+
+    const FName VarName(*VariableName);
+
+    bool bFound = false;
+    for (const FBPVariableDescription& Var : Blueprint->NewVariables)
+    {
+        if (Var.VarName == VarName)
+        {
+            bFound = true;
+            break;
+        }
+    }
+
+    if (!bFound)
+    {
+        Result->SetBoolField("success", false);
+        Result->SetStringField("error", FString::Printf(TEXT("Variable not found: %s"), *VariableName));
+        return Result;
+    }
+
+    // RemoveMemberVariable patches every K2Node_VariableGet / K2Node_VariableSet
+    // that references VarName, and marks the Blueprint modified.
+    FBlueprintEditorUtils::RemoveMemberVariable(Blueprint, VarName);
+
+    FKismetEditorUtilities::CompileBlueprint(Blueprint);
+
+    Result->SetBoolField("success", true);
+    Result->SetStringField("blueprint_name", BlueprintName);
+    Result->SetStringField("variable_name", VariableName);
+    return Result;
 }

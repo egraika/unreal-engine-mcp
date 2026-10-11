@@ -26,6 +26,9 @@ private:
     // Blueprint actor spawning
     TSharedPtr<FJsonObject> HandleSpawnBlueprintActor(const TSharedPtr<FJsonObject>& Params);
 
+    // Batch placement — array of {actor_class, location, rotation?, scale?, name?, static_mesh?, properties?}
+    TSharedPtr<FJsonObject> HandlePlaceActorsBatch(const TSharedPtr<FJsonObject>& Params);
+
     // Level analysis commands
     TSharedPtr<FJsonObject> HandleGetRVTVolumes(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleGetLandscapeInfo(const TSharedPtr<FJsonObject>& Params);

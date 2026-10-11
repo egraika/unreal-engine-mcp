@@ -3,8 +3,41 @@
 #include "UObject/TextProperty.h"
 #include "GameplayTagContainer.h"
 
+namespace
+{
+	// TLS visited-set so recursion through SerializePropertyValue / SerializeObjectProperties
+	// can detect instanced-subobject cycles (e.g. UMG widget Slot.Parent back-edges) without
+	// changing the public function signatures.
+	thread_local TSet<const UObject*>* GSerializeVisited = nullptr;
+
+	struct FSerializeVisitedScope
+	{
+		TSet<const UObject*> LocalSet;
+		bool bOwnsTls = false;
+
+		FSerializeVisitedScope()
+		{
+			if (GSerializeVisited == nullptr)
+			{
+				GSerializeVisited = &LocalSet;
+				bOwnsTls = true;
+			}
+		}
+
+		~FSerializeVisitedScope()
+		{
+			if (bOwnsTls)
+			{
+				GSerializeVisited = nullptr;
+			}
+		}
+	};
+}
+
 TSharedPtr<FJsonValue> FEpicUnrealMCPPropertyUtils::SerializePropertyValue(FProperty* Property, const void* ValuePtr)
 {
+	FSerializeVisitedScope VisitedScope;
+
 	if (!Property || !ValuePtr)
 	{
 		return MakeShared<FJsonValueNull>();
@@ -209,15 +242,56 @@ TSharedPtr<FJsonValue> FEpicUnrealMCPPropertyUtils::SerializePropertyValue(FProp
 		return MakeShared<FJsonValueObject>(StructObj);
 	}
 
-	// 9. Object reference (UObject*, TObjectPtr, TWeakObjectPtr via FObjectPropertyBase)
+	// 9. Object reference (UObject*, TObjectPtr, TWeakObjectPtr via FObjectPropertyBase).
+	//
+	// Two output shapes:
+	//   - External asset ref → "/Game/.../Asset.Asset" string (round-trippable
+	//     via update_data_asset which accepts an asset path).
+	//   - Instanced subobject (CPF_InstancedReference / CPF_PersistentInstance)
+	//     → { "_class": "...", "properties": { ... } } so callers can SEE the
+	//     subobject's class and inner state. Round-trips through the write path,
+	//     which already accepts {"class","properties"}.
+	//
+	// Without the structured form, an Instanced TArray (e.g., AthenaPreset.Tasks)
+	// reads back as an opaque list of paths like
+	// "/Game/.../Preset.Preset:PRKAthenaTask_AidAlly_0" — informative for
+	// existence checks, useless for inspecting what's actually in the array.
 	if (const FObjectPropertyBase* ObjProp = CastField<FObjectPropertyBase>(Property))
 	{
 		UObject* ObjValue = ObjProp->GetObjectPropertyValue(ValuePtr);
-		if (ObjValue)
+		if (!ObjValue)
 		{
-			return MakeShared<FJsonValueString>(ObjValue->GetPathName());
+			return MakeShared<FJsonValueNull>();
 		}
-		return MakeShared<FJsonValueNull>();
+
+		const bool bInstanced = Property->HasAnyPropertyFlags(CPF_InstancedReference | CPF_PersistentInstance);
+		if (bInstanced)
+		{
+			TSharedPtr<FJsonObject> SubObj = MakeShared<FJsonObject>();
+			SubObj->SetStringField(TEXT("_class"), ObjValue->GetClass()->GetPathName());
+
+			// Cycle guard: instanced graphs (UMG slots, etc.) routinely contain back-edges
+			// that would otherwise blow the stack via unbounded recursion.
+			if (GSerializeVisited && GSerializeVisited->Contains(ObjValue))
+			{
+				SubObj->SetBoolField(TEXT("_circular"), true);
+				SubObj->SetStringField(TEXT("_path"), ObjValue->GetPathName());
+				return MakeShared<FJsonValueObject>(SubObj);
+			}
+
+			TSharedPtr<FJsonObject> Inner = SerializeObjectProperties(ObjValue);
+			if (Inner.IsValid())
+			{
+				// SerializeObjectProperties already adds _class and _class_hierarchy;
+				// strip them to keep the {_class, properties} envelope clean.
+				Inner->RemoveField(TEXT("_class"));
+				Inner->RemoveField(TEXT("_class_hierarchy"));
+				SubObj->SetObjectField(TEXT("properties"), Inner);
+			}
+			return MakeShared<FJsonValueObject>(SubObj);
+		}
+
+		return MakeShared<FJsonValueString>(ObjValue->GetPathName());
 	}
 
 	// 10. Array
@@ -325,6 +399,12 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPPropertyUtils::SerializeObjectProperties(U
 		return nullptr;
 	}
 
+	FSerializeVisitedScope VisitedScope;
+	if (GSerializeVisited)
+	{
+		GSerializeVisited->Add(Object);
+	}
+
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 
 	// Add class metadata
@@ -359,6 +439,8 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPPropertyUtils::SerializeObjectProperties(U
 
 TSharedPtr<FJsonObject> FEpicUnrealMCPPropertyUtils::SerializeStructProperties(UScriptStruct* StructType, const void* StructData)
 {
+	FSerializeVisitedScope VisitedScope;
+
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 
 	if (!StructType || !StructData)

@@ -25,6 +25,103 @@
 #include "Kismet/KismetSystemLibrary.h"
 #include "EditorAssetLibrary.h"
 #include "Json.h"
+#include "AnimGraphNode_Base.h"
+
+// Set a property on a UAnimGraphNode_Base by reflecting into its inner FAnimNode_*
+// struct. JSON property names match UPROPERTY names case-insensitively, and also
+// accept the camelCase form returned by FJsonObjectConverter::UStructToJsonObject
+// (e.g. "lODThreshold" -> "LODThreshold"). Supports the common scalar types found
+// on AnimGraph nodes; complex struct fields (e.g. FBoneReference) should be set
+// via dedicated branches in add_anim_node or future helpers.
+static bool SetAnimGraphNodeInnerProperty(
+	UAnimGraphNode_Base* AnimNode,
+	const FString& PropertyName,
+	const TSharedPtr<FJsonValue>& Value)
+{
+	if (!AnimNode || !Value.IsValid()) return false;
+
+	FStructProperty* NodeStructProp = AnimNode->GetFNodeProperty();
+	if (!NodeStructProp || !NodeStructProp->Struct) return false;
+
+	void* NodePtr = NodeStructProp->ContainerPtrToValuePtr<void>(AnimNode);
+	if (!NodePtr) return false;
+
+	// Find by exact name, case-insensitive name, or capitalized-first variant.
+	FProperty* Found = nullptr;
+	for (TFieldIterator<FProperty> It(NodeStructProp->Struct); It; ++It)
+	{
+		const FString FieldName = It->GetName();
+		if (FieldName.Equals(PropertyName, ESearchCase::IgnoreCase))
+		{
+			Found = *It;
+			break;
+		}
+	}
+	if (!Found) return false;
+
+	void* FieldPtr = Found->ContainerPtrToValuePtr<void>(NodePtr);
+
+	if (FIntProperty* IntProp = CastField<FIntProperty>(Found))
+	{
+		IntProp->SetPropertyValue(FieldPtr, static_cast<int32>(Value->AsNumber()));
+	}
+	else if (FFloatProperty* FloatProp = CastField<FFloatProperty>(Found))
+	{
+		FloatProp->SetPropertyValue(FieldPtr, static_cast<float>(Value->AsNumber()));
+	}
+	else if (FDoubleProperty* DoubleProp = CastField<FDoubleProperty>(Found))
+	{
+		DoubleProp->SetPropertyValue(FieldPtr, Value->AsNumber());
+	}
+	else if (FBoolProperty* BoolProp = CastField<FBoolProperty>(Found))
+	{
+		BoolProp->SetPropertyValue(FieldPtr, Value->AsBool());
+	}
+	else if (FByteProperty* ByteProp = CastField<FByteProperty>(Found))
+	{
+		ByteProp->SetPropertyValue(FieldPtr, static_cast<uint8>(Value->AsNumber()));
+	}
+	else if (FNameProperty* NameProp = CastField<FNameProperty>(Found))
+	{
+		NameProp->SetPropertyValue(FieldPtr, FName(*Value->AsString()));
+	}
+	else if (FStrProperty* StrProp = CastField<FStrProperty>(Found))
+	{
+		StrProp->SetPropertyValue(FieldPtr, Value->AsString());
+	}
+	else if (FObjectProperty* ObjectProp = CastField<FObjectProperty>(Found))
+	{
+		// Accept an asset path string and resolve via LoadObject. Empty/null
+		// string clears the reference. Type is checked against the property's
+		// declared class so we don't leave a mistyped reference behind.
+		const FString AssetPath = Value->Type == EJson::String ? Value->AsString() : FString();
+		if (AssetPath.IsEmpty())
+		{
+			ObjectProp->SetObjectPropertyValue(FieldPtr, nullptr);
+		}
+		else
+		{
+			UObject* Loaded = StaticLoadObject(ObjectProp->PropertyClass, nullptr, *AssetPath);
+			if (!Loaded)
+			{
+				return false;
+			}
+			ObjectProp->SetObjectPropertyValue(FieldPtr, Loaded);
+		}
+	}
+	else
+	{
+		return false; // Unsupported scalar type on this property.
+	}
+
+	// Notify the node of the property change without reconstructing pins.
+	// ReconstructNode() is heavy and can recurse through pin rebuilds; for scalar
+	// runtime tunables (LODThreshold, MinRootMotionSpeedThreshold, BLoop, etc.)
+	// PostEditChangeProperty is sufficient and won't fight the editor's pin layout.
+	FPropertyChangedEvent PropertyEvent(Found, EPropertyChangeType::ValueSet);
+	AnimNode->PostEditChangeProperty(PropertyEvent);
+	return true;
+}
 
 TSharedPtr<FJsonObject> FNodePropertyManager::SetNodeProperty(const TSharedPtr<FJsonObject>& Params)
 {
@@ -131,6 +228,15 @@ TSharedPtr<FJsonObject> FNodePropertyManager::SetNodeProperty(const TSharedPtr<F
 		if (K2Node)
 		{
 			Success = SetVariableNodeProperty(K2Node, PropertyName, PropertyValue);
+		}
+	}
+
+	// Try AnimGraph node inner FAnimNode_* properties (LODThreshold, etc.)
+	if (!Success)
+	{
+		if (UAnimGraphNode_Base* AnimNode = Cast<UAnimGraphNode_Base>(Node))
+		{
+			Success = SetAnimGraphNodeInnerProperty(AnimNode, PropertyName, PropertyValue);
 		}
 	}
 

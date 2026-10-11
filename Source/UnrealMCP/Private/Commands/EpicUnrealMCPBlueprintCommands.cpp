@@ -1,13 +1,18 @@
 #include "Commands/EpicUnrealMCPBlueprintCommands.h"
 #include "Commands/EpicUnrealMCPCommonUtils.h"
+#include "Commands/EpicUnrealMCPWidgetCommands.h"
+#include "WidgetBlueprint.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
 #include "Factories/BlueprintFactory.h"
+#include "Kismet2/CompilerResultsLog.h"
+#include "Logging/TokenizedMessage.h"
 #include "EdGraphSchema_K2.h"
 #include "K2Node_Event.h"
 #include "K2Node_VariableGet.h"
 #include "K2Node_VariableSet.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Components/BoxComponent.h"
 #include "Components/SphereComponent.h"
 #include "Components/PrimitiveComponent.h"
@@ -45,6 +50,26 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleCommand(const FSt
     {
         return HandleAddComponentToBlueprint(Params);
     }
+    else if (CommandType == TEXT("add_blueprint_component"))
+    {
+        return HandleAddBlueprintComponent(Params);
+    }
+    else if (CommandType == TEXT("reparent_blueprint_component"))
+    {
+        return HandleReparentBlueprintComponent(Params);
+    }
+    else if (CommandType == TEXT("remove_component_from_blueprint"))
+    {
+        return HandleRemoveComponentFromBlueprint(Params);
+    }
+    else if (CommandType == TEXT("get_blueprint_components"))
+    {
+        return HandleGetBlueprintComponents(Params);
+    }
+    else if (CommandType == TEXT("list_blueprint_components"))
+    {
+        return HandleListBlueprintComponents(Params);
+    }
     else if (CommandType == TEXT("set_physics_properties"))
     {
         return HandleSetPhysicsProperties(Params);
@@ -52,6 +77,18 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleCommand(const FSt
     else if (CommandType == TEXT("compile_blueprint"))
     {
         return HandleCompileBlueprint(Params);
+    }
+    else if (CommandType == TEXT("compile_blueprint_with_diagnostics"))
+    {
+        return HandleCompileBlueprintWithDiagnostics(Params);
+    }
+    else if (CommandType == TEXT("save_blueprint"))
+    {
+        return HandleSaveBlueprint(Params);
+    }
+    else if (CommandType == TEXT("list_blueprints"))
+    {
+        return HandleListBlueprints(Params);
     }
     else if (CommandType == TEXT("set_static_mesh_properties"))
     {
@@ -112,6 +149,32 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleCommand(const FSt
     {
         return HandleSetMaterialInstanceParameters(Params);
     }
+    // CDO default-value editing
+    else if (CommandType == TEXT("get_blueprint_default_value"))
+    {
+        return HandleGetBlueprintDefaultValue(Params);
+    }
+    else if (CommandType == TEXT("set_blueprint_default_value"))
+    {
+        return HandleSetBlueprintDefaultValue(Params);
+    }
+    else if (CommandType == TEXT("reset_blueprint_default_value"))
+    {
+        return HandleResetBlueprintDefaultValue(Params);
+    }
+    // Component archetype editing (inherited C++ default subobjects + SCS-added)
+    else if (CommandType == TEXT("get_component_default_value"))
+    {
+        return HandleGetComponentDefaultValue(Params);
+    }
+    else if (CommandType == TEXT("set_component_default_value"))
+    {
+        return HandleSetComponentDefaultValue(Params);
+    }
+    else if (CommandType == TEXT("reset_component_default_value"))
+    {
+        return HandleResetComponentDefaultValue(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Unknown blueprint command: %s"), *CommandType));
 }
@@ -128,7 +191,7 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleCreateBlueprint(c
     // Check if blueprint already exists
     FString PackagePath = TEXT("/Game/Blueprints/");
     FString AssetName = BlueprintName;
-    if (UEditorAssetLibrary::DoesAssetExist(PackagePath + AssetName))
+    if (FEpicUnrealMCPCommonUtils::AssetExists(PackagePath + AssetName))
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Blueprint already exists: %s"), *BlueprintName));
     }
@@ -272,7 +335,14 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleAddComponentToBlu
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Unknown component type: %s"), *ComponentType));
     }
 
-    // Add the component to the blueprint
+    // Add the component to the blueprint. Guard the SCS: data-only / function-library
+    // blueprints have no SimpleConstructionScript, and dereferencing it would crash the
+    // shared editor process instead of returning an error.
+    if (!Blueprint->SimpleConstructionScript)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Blueprint has no SimpleConstructionScript (cannot add components): %s"), *BlueprintName));
+    }
     USCS_Node* NewNode = Blueprint->SimpleConstructionScript->CreateNode(ComponentClass, *ComponentName);
     if (NewNode)
     {
@@ -309,6 +379,213 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleAddComponentToBlu
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to add component to blueprint"));
 }
 
+// ============================================================================
+// add_blueprint_component — reliable component-add. The older
+// add_component_to_blueprint resolves the class with FindObject<UClass>(nullptr, name)
+// (fails for normal short names like "StaticMeshComponent") and ALWAYS adds at the
+// SCS root (no parent attach → orphaned components whose relative transform looks
+// inert). This one:
+//   • resolves the class via UClass::TryFindTypeSlow with U-prefix / Component-suffix /
+//     /Script path fallbacks, so normal type names work;
+//   • attaches under an existing parent component (SCS node OR native component) when
+//     parent_component is given;
+//   • returns the post-compile state (resolved class, attached parent, transform) to verify.
+// ============================================================================
+
+// File-local robust component-class resolver.
+static UClass* ResolveComponentClass(const FString& TypeName)
+{
+    auto TryName = [](const FString& N) -> UClass*
+    {
+        UClass* C = UClass::TryFindTypeSlow<UClass>(N);
+        return (C && C->IsChildOf(UActorComponent::StaticClass())) ? C : nullptr;
+    };
+
+    // Direct: handles "StaticMeshComponent" and "/Script/Engine.StaticMeshComponent".
+    if (UClass* C = TryName(TypeName)) return C;
+    // + "Component" suffix: "StaticMesh" -> "StaticMeshComponent".
+    if (!TypeName.EndsWith(TEXT("Component")))
+    {
+        if (UClass* C = TryName(TypeName + TEXT("Component"))) return C;
+    }
+    // Strip a leading C++ "U" prefix: "UStaticMeshComponent" -> "StaticMeshComponent".
+    if (TypeName.Len() > 1 && TypeName[0] == TEXT('U') && FChar::IsUpper(TypeName[1]))
+    {
+        const FString Stripped = TypeName.RightChop(1);
+        if (UClass* C = TryName(Stripped)) return C;
+        if (!Stripped.EndsWith(TEXT("Component")))
+        {
+            if (UClass* C = TryName(Stripped + TEXT("Component"))) return C;
+        }
+    }
+    return nullptr;
+}
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleAddBlueprintComponent(const TSharedPtr<FJsonObject>& Params)
+{
+    FString BlueprintName;
+    if (!Params->TryGetStringField(TEXT("blueprint_name"), BlueprintName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'blueprint_name' parameter"));
+    }
+    FString ComponentType;
+    if (!Params->TryGetStringField(TEXT("component_type"), ComponentType))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'component_type' parameter"));
+    }
+    FString ComponentName;
+    if (!Params->TryGetStringField(TEXT("component_name"), ComponentName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'component_name' parameter"));
+    }
+    FString ParentComponent;
+    Params->TryGetStringField(TEXT("parent_component"), ParentComponent);
+
+    UBlueprint* Blueprint = FEpicUnrealMCPCommonUtils::FindBlueprint(BlueprintName);
+    if (!Blueprint)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintName));
+    }
+
+    UClass* ComponentClass = ResolveComponentClass(ComponentType);
+    if (!ComponentClass)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Unknown component type: '%s' (no UActorComponent subclass resolved)"), *ComponentType));
+    }
+
+    USimpleConstructionScript* SCS = Blueprint->SimpleConstructionScript;
+    if (!SCS)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Blueprint has no SimpleConstructionScript (cannot add components): %s"), *BlueprintName));
+    }
+
+    // Reject duplicate variable names — they cause compile errors / silent renames.
+    for (USCS_Node* Node : SCS->GetAllNodes())
+    {
+        if (Node && Node->GetVariableName().ToString() == ComponentName)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Component '%s' already exists on blueprint"), *ComponentName));
+        }
+    }
+
+    USCS_Node* NewNode = SCS->CreateNode(ComponentClass, *ComponentName);
+    if (!NewNode)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to create component node"));
+    }
+
+    // Transform (scene components only).
+    USceneComponent* SceneTemplate = Cast<USceneComponent>(NewNode->ComponentTemplate);
+    if (SceneTemplate)
+    {
+        if (Params->HasField(TEXT("location")))
+            SceneTemplate->SetRelativeLocation(FEpicUnrealMCPCommonUtils::GetVectorFromJson(Params, TEXT("location")));
+        if (Params->HasField(TEXT("rotation")))
+            SceneTemplate->SetRelativeRotation(FEpicUnrealMCPCommonUtils::GetRotatorFromJson(Params, TEXT("rotation")));
+        if (Params->HasField(TEXT("scale")))
+            SceneTemplate->SetRelativeScale3D(FEpicUnrealMCPCommonUtils::GetVectorFromJson(Params, TEXT("scale")));
+    }
+
+    // Attachment.
+    FString ResolvedParent;
+    bool bParentIgnored = false;
+    if (!ParentComponent.IsEmpty() && SceneTemplate)
+    {
+        // 1) An existing SCS node (this blueprint).
+        USCS_Node* ParentNode = nullptr;
+        for (USCS_Node* Node : SCS->GetAllNodes())
+        {
+            if (Node && Node->GetVariableName().ToString() == ParentComponent)
+            {
+                ParentNode = Node;
+                break;
+            }
+        }
+
+        if (ParentNode)
+        {
+            ParentNode->AddChildNode(NewNode); // registers in AllNodes + child array
+            ResolvedParent = ParentComponent;
+        }
+        else
+        {
+            // 2) A native component on the CDO (e.g. the native scene root or a native mesh).
+            USceneComponent* NativeParent = nullptr;
+            UClass* GenClass = Blueprint->GeneratedClass ? Blueprint->GeneratedClass.Get() : Blueprint->SkeletonGeneratedClass.Get();
+            if (AActor* CDO = GenClass ? Cast<AActor>(GenClass->GetDefaultObject()) : nullptr)
+            {
+                TInlineComponentArray<USceneComponent*> SceneComps(CDO);
+                for (USceneComponent* Comp : SceneComps)
+                {
+                    if (Comp && Comp->GetFName().ToString() == ParentComponent)
+                    {
+                        NativeParent = Comp;
+                        break;
+                    }
+                }
+            }
+
+            if (NativeParent)
+            {
+                SCS->AddNode(NewNode);
+                NewNode->SetParent(NativeParent); // marks native-parent linkage
+                ResolvedParent = ParentComponent;
+            }
+            else
+            {
+                // Parent not found — fail cleanly rather than silently orphaning at root.
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("parent_component '%s' not found (no SCS node or native component)"), *ParentComponent));
+            }
+        }
+    }
+    else
+    {
+        if (!ParentComponent.IsEmpty() && !SceneTemplate)
+        {
+            bParentIgnored = true; // non-scene components can't attach
+        }
+        SCS->AddNode(NewNode); // root
+    }
+
+    FKismetEditorUtilities::CompileBlueprint(Blueprint);
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetBoolField(TEXT("success"), true);
+    ResultObj->SetStringField(TEXT("blueprint_name"), BlueprintName);
+    ResultObj->SetStringField(TEXT("component_name"), ComponentName);
+    ResultObj->SetStringField(TEXT("component_type"), ComponentType);
+    ResultObj->SetStringField(TEXT("resolved_class"), ComponentClass->GetName());
+    ResultObj->SetStringField(TEXT("parent"), ResolvedParent);
+    ResultObj->SetBoolField(TEXT("is_scene_component"), SceneTemplate != nullptr);
+    if (bParentIgnored)
+    {
+        ResultObj->SetBoolField(TEXT("parent_ignored"), true);
+        ResultObj->SetStringField(TEXT("warning"), TEXT("parent_component ignored: component is not a scene component and cannot attach"));
+    }
+    if (SceneTemplate)
+    {
+        const FVector Loc = SceneTemplate->GetRelativeLocation();
+        const FRotator Rot = SceneTemplate->GetRelativeRotation();
+        const FVector Scl = SceneTemplate->GetRelativeScale3D();
+        TSharedPtr<FJsonObject> Transform = MakeShared<FJsonObject>();
+        TSharedPtr<FJsonObject> LocObj = MakeShared<FJsonObject>();
+        LocObj->SetNumberField(TEXT("x"), Loc.X); LocObj->SetNumberField(TEXT("y"), Loc.Y); LocObj->SetNumberField(TEXT("z"), Loc.Z);
+        Transform->SetObjectField(TEXT("location"), LocObj);
+        TSharedPtr<FJsonObject> RotObj = MakeShared<FJsonObject>();
+        RotObj->SetNumberField(TEXT("pitch"), Rot.Pitch); RotObj->SetNumberField(TEXT("yaw"), Rot.Yaw); RotObj->SetNumberField(TEXT("roll"), Rot.Roll);
+        Transform->SetObjectField(TEXT("rotation"), RotObj);
+        TSharedPtr<FJsonObject> SclObj = MakeShared<FJsonObject>();
+        SclObj->SetNumberField(TEXT("x"), Scl.X); SclObj->SetNumberField(TEXT("y"), Scl.Y); SclObj->SetNumberField(TEXT("z"), Scl.Z);
+        Transform->SetObjectField(TEXT("scale"), SclObj);
+        ResultObj->SetObjectField(TEXT("transform"), Transform);
+    }
+    return ResultObj;
+}
+
 TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleSetPhysicsProperties(const TSharedPtr<FJsonObject>& Params)
 {
     // Get required parameters
@@ -329,6 +606,12 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleSetPhysicsPropert
     if (!Blueprint)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintName));
+    }
+
+    if (!Blueprint->SimpleConstructionScript)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Blueprint has no SimpleConstructionScript: %s"), *BlueprintName));
     }
 
     // Find the component
@@ -401,12 +684,103 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleCompileBlueprint(
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintName));
     }
 
+    // Widget Blueprints need GUID-map reconciliation before compile or the
+    // compiler's ValidateAndFixUpVariableGuids ensure fires (and drops
+    // unresolved widgets to TRASH_*). Tree mutations made via run_python or
+    // any tool that bypassed UWidgetBlueprint::OnVariableAdded land here.
+    if (UWidgetBlueprint* WBP = Cast<UWidgetBlueprint>(Blueprint))
+    {
+        EpicUnrealMCP_ReconcileWidgetBlueprintGuids(WBP);
+    }
+
     // Compile the blueprint
     FKismetEditorUtilities::CompileBlueprint(Blueprint);
 
     TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
     ResultObj->SetStringField(TEXT("name"), BlueprintName);
     ResultObj->SetBoolField(TEXT("compiled"), true);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleCompileBlueprintWithDiagnostics(const TSharedPtr<FJsonObject>& Params)
+{
+    FString BlueprintName;
+    if (!Params->TryGetStringField(TEXT("blueprint_name"), BlueprintName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'blueprint_name' parameter"));
+    }
+
+    UBlueprint* Blueprint = FEpicUnrealMCPCommonUtils::FindBlueprint(BlueprintName);
+    if (!Blueprint)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintName));
+    }
+
+    if (UWidgetBlueprint* WBP = Cast<UWidgetBlueprint>(Blueprint))
+    {
+        EpicUnrealMCP_ReconcileWidgetBlueprintGuids(WBP);
+    }
+
+    FCompilerResultsLog Results;
+    Results.SetSourcePath(Blueprint->GetPathName());
+    Results.BeginEvent(TEXT("MCP_CompileBlueprintWithDiagnostics"));
+
+    FKismetEditorUtilities::CompileBlueprint(Blueprint, EBlueprintCompileOptions::None, &Results);
+
+    Results.EndEvent();
+
+    TArray<TSharedPtr<FJsonValue>> ErrorEntries;
+    TArray<TSharedPtr<FJsonValue>> WarningEntries;
+    TArray<TSharedPtr<FJsonValue>> NoteEntries;
+
+    for (const TSharedRef<FTokenizedMessage>& Msg : Results.Messages)
+    {
+        TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+        const EMessageSeverity::Type Sev = Msg->GetSeverity();
+        FString SeverityStr;
+        switch (Sev)
+        {
+            case EMessageSeverity::Error:              SeverityStr = TEXT("Error");        break;
+            case EMessageSeverity::PerformanceWarning: SeverityStr = TEXT("PerfWarning");  break;
+            case EMessageSeverity::Warning:            SeverityStr = TEXT("Warning");      break;
+            case EMessageSeverity::Info:               SeverityStr = TEXT("Info");         break;
+            default:                                   SeverityStr = TEXT("Unknown");      break;
+        }
+        Entry->SetStringField(TEXT("severity"), SeverityStr);
+        Entry->SetStringField(TEXT("text"), Msg->ToText().ToString());
+
+        TSharedPtr<FJsonValue> JsonValue = MakeShared<FJsonValueObject>(Entry);
+        if (Sev == EMessageSeverity::Error)
+        {
+            ErrorEntries.Add(JsonValue);
+        }
+        else if (Sev == EMessageSeverity::Warning || Sev == EMessageSeverity::PerformanceWarning)
+        {
+            WarningEntries.Add(JsonValue);
+        }
+        else
+        {
+            NoteEntries.Add(JsonValue);
+        }
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("name"), BlueprintName);
+    ResultObj->SetStringField(TEXT("path"), Blueprint->GetPathName());
+    ResultObj->SetNumberField(TEXT("num_errors"), Results.NumErrors);
+    ResultObj->SetNumberField(TEXT("num_warnings"), Results.NumWarnings);
+    ResultObj->SetBoolField(TEXT("compiled"), Results.NumErrors == 0);
+    ResultObj->SetArrayField(TEXT("errors"), ErrorEntries);
+    ResultObj->SetArrayField(TEXT("warnings"), WarningEntries);
+    ResultObj->SetArrayField(TEXT("notes"), NoteEntries);
+
+    const FString StatusStr = (Blueprint->Status == BS_UpToDate) ? TEXT("UpToDate")
+        : (Blueprint->Status == BS_Dirty) ? TEXT("Dirty")
+        : (Blueprint->Status == BS_Error) ? TEXT("Error")
+        : (Blueprint->Status == BS_Unknown) ? TEXT("Unknown")
+        : TEXT("UpToDateWithWarnings");
+    ResultObj->SetStringField(TEXT("status"), StatusStr);
+
     return ResultObj;
 }
 
@@ -459,7 +833,7 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleSpawnBlueprintAct
     UE_LOG(LogTemp, Warning, TEXT("HandleSpawnBlueprintActor: Getting editor world"));
 
     // Spawn the actor
-    UWorld* World = GEditor->GetEditorWorldContext().World();
+    UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
     if (!World)
     {
         UE_LOG(LogTemp, Error, TEXT("HandleSpawnBlueprintActor: Failed to get editor world"));
@@ -519,6 +893,12 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleSetStaticMeshProp
     if (!Blueprint)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintName));
+    }
+
+    if (!Blueprint->SimpleConstructionScript)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Blueprint has no SimpleConstructionScript: %s"), *BlueprintName));
     }
 
     // Find the component
@@ -592,6 +972,12 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleSetMeshMaterialCo
     if (!Blueprint)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintName));
+    }
+
+    if (!Blueprint->SimpleConstructionScript)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Blueprint has no SimpleConstructionScript: %s"), *BlueprintName));
     }
 
     // Find the component
@@ -859,7 +1245,7 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleApplyMaterialToAc
 
     // Find the actor
     AActor* TargetActor = nullptr;
-    UWorld* World = GEditor->GetEditorWorldContext().World();
+    UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
     if (!World)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to get editor world"));
@@ -951,6 +1337,12 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleApplyMaterialToBl
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintName));
     }
 
+    if (!Blueprint->SimpleConstructionScript)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Blueprint has no SimpleConstructionScript: %s"), *BlueprintName));
+    }
+
     // Find the component
     USCS_Node* ComponentNode = nullptr;
     for (USCS_Node* Node : Blueprint->SimpleConstructionScript->GetAllNodes())
@@ -1007,7 +1399,7 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleGetActorMaterialI
 
     // Find the actor
     AActor* TargetActor = nullptr;
-    UWorld* World = GEditor->GetEditorWorldContext().World();
+    UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
     if (!World)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to get editor world"));
@@ -1093,6 +1485,12 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleGetBlueprintMater
     if (!Blueprint)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintName));
+    }
+
+    if (!Blueprint->SimpleConstructionScript)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Blueprint has no SimpleConstructionScript: %s"), *BlueprintName));
     }
 
     // Find the component
@@ -1189,7 +1587,7 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleReadBlueprintCont
     Params->TryGetBoolField(TEXT("include_interfaces"), bIncludeInterfaces);
 
     // Load the blueprint
-    UBlueprint* Blueprint = Cast<UBlueprint>(UEditorAssetLibrary::LoadAsset(BlueprintPath));
+    UBlueprint* Blueprint = Cast<UBlueprint>(FEpicUnrealMCPCommonUtils::ResolveAsset(BlueprintPath));
     if (!Blueprint)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Failed to load blueprint: %s"), *BlueprintPath));
@@ -1332,7 +1730,7 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleAnalyzeBlueprintG
     Params->TryGetBoolField(TEXT("trace_execution_flow"), bTraceExecutionFlow);
 
     // Load the blueprint
-    UBlueprint* Blueprint = Cast<UBlueprint>(UEditorAssetLibrary::LoadAsset(BlueprintPath));
+    UBlueprint* Blueprint = Cast<UBlueprint>(FEpicUnrealMCPCommonUtils::ResolveAsset(BlueprintPath));
     if (!Blueprint)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Failed to load blueprint: %s"), *BlueprintPath));
@@ -1471,7 +1869,7 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleGetBlueprintVaria
     bool bSpecificVariable = Params->TryGetStringField(TEXT("variable_name"), VariableName);
 
     // Load the blueprint
-    UBlueprint* Blueprint = Cast<UBlueprint>(UEditorAssetLibrary::LoadAsset(BlueprintPath));
+    UBlueprint* Blueprint = Cast<UBlueprint>(FEpicUnrealMCPCommonUtils::ResolveAsset(BlueprintPath));
     if (!Blueprint)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Failed to load blueprint: %s"), *BlueprintPath));
@@ -1557,7 +1955,7 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleGetBlueprintFunct
     Params->TryGetBoolField(TEXT("include_graph"), bIncludeGraph);
 
     // Load the blueprint
-    UBlueprint* Blueprint = Cast<UBlueprint>(UEditorAssetLibrary::LoadAsset(BlueprintPath));
+    UBlueprint* Blueprint = Cast<UBlueprint>(FEpicUnrealMCPCommonUtils::ResolveAsset(BlueprintPath));
     if (!Blueprint)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Failed to load blueprint: %s"), *BlueprintPath));
@@ -2163,4 +2561,1059 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleSetMaterialInstan
 	ResultObj->SetNumberField(TEXT("static_switches_set"), StaticSwitchesSet);
 	ResultObj->SetArrayField(TEXT("errors"), ErrorsArray);
 	return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleRemoveComponentFromBlueprint(const TSharedPtr<FJsonObject>& Params)
+{
+    FString BlueprintName;
+    if (!Params->TryGetStringField(TEXT("blueprint_name"), BlueprintName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'blueprint_name' parameter"));
+    }
+
+    FString ComponentName;
+    if (!Params->TryGetStringField(TEXT("component_name"), ComponentName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'component_name' parameter"));
+    }
+
+    UBlueprint* Blueprint = FEpicUnrealMCPCommonUtils::FindBlueprint(BlueprintName);
+    if (!Blueprint)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintName));
+    }
+
+    if (!Blueprint->SimpleConstructionScript)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Blueprint has no SimpleConstructionScript"));
+    }
+
+    USCS_Node* NodeToRemove = nullptr;
+    for (USCS_Node* Node : Blueprint->SimpleConstructionScript->GetAllNodes())
+    {
+        if (Node && Node->GetVariableName().ToString() == ComponentName)
+        {
+            NodeToRemove = Node;
+            break;
+        }
+    }
+
+    if (!NodeToRemove)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Component not found: %s"), *ComponentName));
+    }
+
+    // RemoveNode handles reparenting children of the removed node under the
+    // removed node's parent, and preserves SCS consistency.
+    Blueprint->SimpleConstructionScript->RemoveNodeAndPromoteChildren(NodeToRemove);
+
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+    FKismetEditorUtilities::CompileBlueprint(Blueprint);
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetBoolField(TEXT("success"), true);
+    ResultObj->SetStringField(TEXT("blueprint_name"), BlueprintName);
+    ResultObj->SetStringField(TEXT("component_name"), ComponentName);
+    return ResultObj;
+}
+
+// ============================================================================
+// reparent_blueprint_component — move an EXISTING SCS component under a new
+// parent (SCS node or native CDO component; empty new_parent => root). The
+// non-destructive complement to add_blueprint_component: SCS node-graph editing
+// is editor C++ and not Python-reachable, so this is the only reliable path to
+// restructure a blueprint's component hierarchy (e.g. reparent a door mesh under
+// a hinge-pivot scene component). Optional location/rotation/scale set the
+// post-reparent RELATIVE transform (its meaning changes under the new parent).
+// ============================================================================
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleReparentBlueprintComponent(const TSharedPtr<FJsonObject>& Params)
+{
+    FString BlueprintName;
+    if (!Params->TryGetStringField(TEXT("blueprint_name"), BlueprintName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'blueprint_name' parameter"));
+    }
+    FString ComponentName;
+    if (!Params->TryGetStringField(TEXT("component_name"), ComponentName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'component_name' parameter"));
+    }
+    // Empty / omitted new_parent_component => reparent to the SCS root.
+    FString NewParent;
+    Params->TryGetStringField(TEXT("new_parent_component"), NewParent);
+
+    UBlueprint* Blueprint = FEpicUnrealMCPCommonUtils::FindBlueprint(BlueprintName);
+    if (!Blueprint)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintName));
+    }
+
+    USimpleConstructionScript* SCS = Blueprint->SimpleConstructionScript;
+    if (!SCS)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Blueprint has no SimpleConstructionScript: %s"), *BlueprintName));
+    }
+
+    // Find the child node to move.
+    USCS_Node* ChildNode = nullptr;
+    for (USCS_Node* Node : SCS->GetAllNodes())
+    {
+        if (Node && Node->GetVariableName().ToString() == ComponentName)
+        {
+            ChildNode = Node;
+            break;
+        }
+    }
+    if (!ChildNode)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Component not found: %s"), *ComponentName));
+    }
+
+    USceneComponent* SceneTemplate = Cast<USceneComponent>(ChildNode->ComponentTemplate);
+    if (!SceneTemplate)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Component '%s' is not a scene component and cannot be reparented"), *ComponentName));
+    }
+
+    // Resolve the new parent: 1) an SCS node, 2) a native CDO scene component, 3) root.
+    USCS_Node* NewParentNode = nullptr;
+    USceneComponent* NativeParent = nullptr;
+    if (!NewParent.IsEmpty())
+    {
+        for (USCS_Node* Node : SCS->GetAllNodes())
+        {
+            if (Node && Node->GetVariableName().ToString() == NewParent)
+            {
+                NewParentNode = Node;
+                break;
+            }
+        }
+
+        if (NewParentNode == ChildNode)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Cannot parent a component to itself"));
+        }
+
+        if (!NewParentNode)
+        {
+            UClass* GenClass = Blueprint->GeneratedClass ? Blueprint->GeneratedClass.Get() : Blueprint->SkeletonGeneratedClass.Get();
+            if (AActor* CDO = GenClass ? Cast<AActor>(GenClass->GetDefaultObject()) : nullptr)
+            {
+                TInlineComponentArray<USceneComponent*> SceneComps(CDO);
+                for (USceneComponent* Comp : SceneComps)
+                {
+                    if (Comp && Comp->GetFName().ToString() == NewParent)
+                    {
+                        NativeParent = Comp;
+                        break;
+                    }
+                }
+            }
+            if (!NativeParent)
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("new_parent_component '%s' not found (no SCS node or native component)"), *NewParent));
+            }
+        }
+
+        // Cycle guard: the new parent must not be a descendant of the moved node.
+        for (USCS_Node* Walk = NewParentNode ? SCS->FindParentNode(NewParentNode) : nullptr; Walk; Walk = SCS->FindParentNode(Walk))
+        {
+            if (Walk == ChildNode)
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    TEXT("Cannot reparent: target parent is a descendant of the component (would create a cycle)"));
+            }
+        }
+    }
+
+    // Detach from its current location (keeps ChildNode's own subtree intact).
+    USCS_Node* OldParent = SCS->FindParentNode(ChildNode);
+    if (OldParent)
+    {
+        OldParent->RemoveChildNode(ChildNode, /*bRemoveFromAllNodes=*/true);
+    }
+    else
+    {
+        SCS->RemoveNode(ChildNode); // was a root node
+    }
+
+    // Re-attach under the resolved parent (re-registers in AllNodes).
+    FString ResolvedParent;
+    if (NewParentNode)
+    {
+        NewParentNode->AddChildNode(ChildNode);
+        ResolvedParent = NewParent;
+    }
+    else if (NativeParent)
+    {
+        SCS->AddNode(ChildNode);
+        ChildNode->SetParent(NativeParent);
+        ResolvedParent = NewParent;
+    }
+    else
+    {
+        SCS->AddNode(ChildNode); // root
+    }
+
+    // Optional post-reparent relative transform.
+    if (Params->HasField(TEXT("location")))
+        SceneTemplate->SetRelativeLocation(FEpicUnrealMCPCommonUtils::GetVectorFromJson(Params, TEXT("location")));
+    if (Params->HasField(TEXT("rotation")))
+        SceneTemplate->SetRelativeRotation(FEpicUnrealMCPCommonUtils::GetRotatorFromJson(Params, TEXT("rotation")));
+    if (Params->HasField(TEXT("scale")))
+        SceneTemplate->SetRelativeScale3D(FEpicUnrealMCPCommonUtils::GetVectorFromJson(Params, TEXT("scale")));
+
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+    FKismetEditorUtilities::CompileBlueprint(Blueprint);
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetBoolField(TEXT("success"), true);
+    ResultObj->SetStringField(TEXT("blueprint_name"), BlueprintName);
+    ResultObj->SetStringField(TEXT("component_name"), ComponentName);
+    ResultObj->SetStringField(TEXT("parent"), ResolvedParent);
+    {
+        const FVector Loc = SceneTemplate->GetRelativeLocation();
+        const FRotator Rot = SceneTemplate->GetRelativeRotation();
+        const FVector Scl = SceneTemplate->GetRelativeScale3D();
+        TSharedPtr<FJsonObject> Transform = MakeShared<FJsonObject>();
+        TSharedPtr<FJsonObject> LocObj = MakeShared<FJsonObject>();
+        LocObj->SetNumberField(TEXT("x"), Loc.X); LocObj->SetNumberField(TEXT("y"), Loc.Y); LocObj->SetNumberField(TEXT("z"), Loc.Z);
+        Transform->SetObjectField(TEXT("location"), LocObj);
+        TSharedPtr<FJsonObject> RotObj = MakeShared<FJsonObject>();
+        RotObj->SetNumberField(TEXT("pitch"), Rot.Pitch); RotObj->SetNumberField(TEXT("yaw"), Rot.Yaw); RotObj->SetNumberField(TEXT("roll"), Rot.Roll);
+        Transform->SetObjectField(TEXT("rotation"), RotObj);
+        TSharedPtr<FJsonObject> SclObj = MakeShared<FJsonObject>();
+        SclObj->SetNumberField(TEXT("x"), Scl.X); SclObj->SetNumberField(TEXT("y"), Scl.Y); SclObj->SetNumberField(TEXT("z"), Scl.Z);
+        Transform->SetObjectField(TEXT("scale"), SclObj);
+        ResultObj->SetObjectField(TEXT("transform"), Transform);
+    }
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleGetBlueprintComponents(const TSharedPtr<FJsonObject>& Params)
+{
+    FString BlueprintName;
+    if (!Params->TryGetStringField(TEXT("blueprint_name"), BlueprintName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'blueprint_name' parameter"));
+    }
+
+    UBlueprint* Blueprint = FEpicUnrealMCPCommonUtils::FindBlueprint(BlueprintName);
+    if (!Blueprint)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintName));
+    }
+
+    TArray<TSharedPtr<FJsonValue>> Components;
+
+    if (Blueprint->SimpleConstructionScript)
+    {
+        for (USCS_Node* Node : Blueprint->SimpleConstructionScript->GetAllNodes())
+        {
+            if (!Node) continue;
+
+            TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+            Entry->SetStringField(TEXT("name"), Node->GetVariableName().ToString());
+            Entry->SetStringField(TEXT("class"),
+                Node->ComponentClass ? Node->ComponentClass->GetName() : TEXT(""));
+
+            USCS_Node* Parent = Blueprint->SimpleConstructionScript->FindParentNode(Node);
+            if (Parent)
+            {
+                Entry->SetStringField(TEXT("parent"), Parent->GetVariableName().ToString());
+            }
+            else
+            {
+                Entry->SetStringField(TEXT("parent"), TEXT(""));
+            }
+
+            if (USceneComponent* SceneTemplate = Cast<USceneComponent>(Node->ComponentTemplate))
+            {
+                const FVector Loc = SceneTemplate->GetRelativeLocation();
+                const FRotator Rot = SceneTemplate->GetRelativeRotation();
+                const FVector Scl = SceneTemplate->GetRelativeScale3D();
+
+                TSharedPtr<FJsonObject> Transform = MakeShared<FJsonObject>();
+                TSharedPtr<FJsonObject> LocObj = MakeShared<FJsonObject>();
+                LocObj->SetNumberField(TEXT("x"), Loc.X);
+                LocObj->SetNumberField(TEXT("y"), Loc.Y);
+                LocObj->SetNumberField(TEXT("z"), Loc.Z);
+                Transform->SetObjectField(TEXT("location"), LocObj);
+
+                TSharedPtr<FJsonObject> RotObj = MakeShared<FJsonObject>();
+                RotObj->SetNumberField(TEXT("pitch"), Rot.Pitch);
+                RotObj->SetNumberField(TEXT("yaw"), Rot.Yaw);
+                RotObj->SetNumberField(TEXT("roll"), Rot.Roll);
+                Transform->SetObjectField(TEXT("rotation"), RotObj);
+
+                TSharedPtr<FJsonObject> SclObj = MakeShared<FJsonObject>();
+                SclObj->SetNumberField(TEXT("x"), Scl.X);
+                SclObj->SetNumberField(TEXT("y"), Scl.Y);
+                SclObj->SetNumberField(TEXT("z"), Scl.Z);
+                Transform->SetObjectField(TEXT("scale"), SclObj);
+
+                Entry->SetObjectField(TEXT("transform"), Transform);
+            }
+
+            Components.Add(MakeShared<FJsonValueObject>(Entry));
+        }
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetBoolField(TEXT("success"), true);
+    ResultObj->SetStringField(TEXT("blueprint_name"), BlueprintName);
+    ResultObj->SetArrayField(TEXT("components"), Components);
+    ResultObj->SetNumberField(TEXT("count"), Components.Num());
+    return ResultObj;
+}
+
+// ============================================================================
+// list_blueprint_components — COMPLETE component enumeration: native (C++ ctor)
+// AND SCS components, including SCS inherited from parent blueprints, each with
+// class, mesh asset, relative transform, and attach parent. The older
+// get_blueprint_components returns SCS-only with no native components and no
+// mesh — this is the reliable replacement for the SubobjectDataSubsystem dance.
+// ============================================================================
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleListBlueprintComponents(const TSharedPtr<FJsonObject>& Params)
+{
+    FString BlueprintName;
+    if (!Params->TryGetStringField(TEXT("blueprint_name"), BlueprintName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'blueprint_name' parameter"));
+    }
+
+    UBlueprint* Blueprint = FEpicUnrealMCPCommonUtils::FindBlueprint(BlueprintName);
+    if (!Blueprint)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintName));
+    }
+
+    // Serialize a scene component's relative transform.
+    auto AddSceneTransform = [](const TSharedPtr<FJsonObject>& Entry, const USceneComponent* SceneComp)
+    {
+        const FVector Loc = SceneComp->GetRelativeLocation();
+        const FRotator Rot = SceneComp->GetRelativeRotation();
+        const FVector Scl = SceneComp->GetRelativeScale3D();
+
+        TSharedPtr<FJsonObject> Transform = MakeShared<FJsonObject>();
+        TSharedPtr<FJsonObject> LocObj = MakeShared<FJsonObject>();
+        LocObj->SetNumberField(TEXT("x"), Loc.X); LocObj->SetNumberField(TEXT("y"), Loc.Y); LocObj->SetNumberField(TEXT("z"), Loc.Z);
+        Transform->SetObjectField(TEXT("location"), LocObj);
+        TSharedPtr<FJsonObject> RotObj = MakeShared<FJsonObject>();
+        RotObj->SetNumberField(TEXT("pitch"), Rot.Pitch); RotObj->SetNumberField(TEXT("yaw"), Rot.Yaw); RotObj->SetNumberField(TEXT("roll"), Rot.Roll);
+        Transform->SetObjectField(TEXT("rotation"), RotObj);
+        TSharedPtr<FJsonObject> SclObj = MakeShared<FJsonObject>();
+        SclObj->SetNumberField(TEXT("x"), Scl.X); SclObj->SetNumberField(TEXT("y"), Scl.Y); SclObj->SetNumberField(TEXT("z"), Scl.Z);
+        Transform->SetObjectField(TEXT("scale"), SclObj);
+        Entry->SetObjectField(TEXT("transform"), Transform);
+    };
+
+    // Resolve a component's mesh asset path (static or skeletal), if any.
+    auto AddMesh = [](const TSharedPtr<FJsonObject>& Entry, const UActorComponent* Comp)
+    {
+        if (const UStaticMeshComponent* SMC = Cast<UStaticMeshComponent>(Comp))
+        {
+            if (SMC->GetStaticMesh()) Entry->SetStringField(TEXT("mesh"), SMC->GetStaticMesh()->GetPathName());
+        }
+        else if (const USkeletalMeshComponent* SKC = Cast<USkeletalMeshComponent>(Comp))
+        {
+            if (SKC->GetSkeletalMeshAsset()) Entry->SetStringField(TEXT("mesh"), SKC->GetSkeletalMeshAsset()->GetPathName());
+        }
+    };
+
+    TArray<TSharedPtr<FJsonValue>> Components;
+    int32 NativeCount = 0;
+    int32 ScsCount = 0;
+
+    // --- Native components: live as default subobjects on the CDO (SCS components do not). ---
+    UClass* GenClass = Blueprint->GeneratedClass ? Blueprint->GeneratedClass.Get() : Blueprint->SkeletonGeneratedClass.Get();
+    if (AActor* CDO = GenClass ? Cast<AActor>(GenClass->GetDefaultObject()) : nullptr)
+    {
+        TInlineComponentArray<UActorComponent*> NativeComps(CDO);
+        for (UActorComponent* Comp : NativeComps)
+        {
+            if (!Comp) continue;
+
+            TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+            Entry->SetStringField(TEXT("name"), Comp->GetFName().ToString());
+            Entry->SetStringField(TEXT("class"), Comp->GetClass() ? Comp->GetClass()->GetName() : TEXT(""));
+            Entry->SetStringField(TEXT("source"), TEXT("native"));
+            AddMesh(Entry, Comp);
+
+            if (USceneComponent* SceneComp = Cast<USceneComponent>(Comp))
+            {
+                AddSceneTransform(Entry, SceneComp);
+                Entry->SetStringField(TEXT("parent"),
+                    SceneComp->GetAttachParent() ? SceneComp->GetAttachParent()->GetFName().ToString() : TEXT(""));
+            }
+            else
+            {
+                Entry->SetStringField(TEXT("parent"), TEXT(""));
+            }
+
+            Components.Add(MakeShared<FJsonValueObject>(Entry));
+            ++NativeCount;
+        }
+    }
+
+    // --- SCS components: this blueprint plus every parent blueprint up the chain. ---
+    UClass* Cur = Blueprint->GeneratedClass ? Blueprint->GeneratedClass.Get() : nullptr;
+    bool bIsLeaf = true;
+    while (Cur)
+    {
+        UBlueprintGeneratedClass* BPGC = Cast<UBlueprintGeneratedClass>(Cur);
+        USimpleConstructionScript* SCS = BPGC ? BPGC->SimpleConstructionScript : nullptr;
+        if (SCS)
+        {
+            const FString SourceTag = bIsLeaf ? TEXT("scs") : TEXT("inherited_scs");
+            for (USCS_Node* Node : SCS->GetAllNodes())
+            {
+                if (!Node) continue;
+
+                TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+                Entry->SetStringField(TEXT("name"), Node->GetVariableName().ToString());
+                Entry->SetStringField(TEXT("class"), Node->ComponentClass ? Node->ComponentClass->GetName() : TEXT(""));
+                Entry->SetStringField(TEXT("source"), SourceTag);
+                AddMesh(Entry, Node->ComponentTemplate);
+
+                // Parent: an SCS sibling node, else a native component (root SCS node attaching to the native root).
+                if (USCS_Node* Parent = SCS->FindParentNode(Node))
+                {
+                    Entry->SetStringField(TEXT("parent"), Parent->GetVariableName().ToString());
+                }
+                else if (Node->ParentComponentOrVariableName != NAME_None)
+                {
+                    Entry->SetStringField(TEXT("parent"), Node->ParentComponentOrVariableName.ToString());
+                }
+                else
+                {
+                    Entry->SetStringField(TEXT("parent"), TEXT(""));
+                }
+
+                if (USceneComponent* SceneTemplate = Cast<USceneComponent>(Node->ComponentTemplate))
+                {
+                    AddSceneTransform(Entry, SceneTemplate);
+                }
+
+                Components.Add(MakeShared<FJsonValueObject>(Entry));
+                ++ScsCount;
+            }
+        }
+        Cur = Cur->GetSuperClass();
+        bIsLeaf = false;
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetBoolField(TEXT("success"), true);
+    ResultObj->SetStringField(TEXT("blueprint_name"), BlueprintName);
+    ResultObj->SetArrayField(TEXT("components"), Components);
+    ResultObj->SetNumberField(TEXT("count"), Components.Num());
+    ResultObj->SetNumberField(TEXT("native_count"), NativeCount);
+    ResultObj->SetNumberField(TEXT("scs_count"), ScsCount);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleSaveBlueprint(const TSharedPtr<FJsonObject>& Params)
+{
+    FString BlueprintName;
+    if (!Params->TryGetStringField(TEXT("blueprint_name"), BlueprintName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'blueprint_name' parameter"));
+    }
+
+    const bool bOnlyIfDirty = Params->HasField(TEXT("only_if_dirty"))
+        ? Params->GetBoolField(TEXT("only_if_dirty")) : true;
+
+    UBlueprint* Blueprint = FEpicUnrealMCPCommonUtils::FindBlueprint(BlueprintName);
+    if (!Blueprint)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintName));
+    }
+
+    UPackage* Package = Blueprint->GetOutermost();
+    const FString PackageName = Package ? Package->GetName() : FString();
+
+    const bool bDirty = Package ? Package->IsDirty() : false;
+    if (bOnlyIfDirty && !bDirty)
+    {
+        TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+        ResultObj->SetBoolField(TEXT("success"), true);
+        ResultObj->SetBoolField(TEXT("saved"), false);
+        ResultObj->SetStringField(TEXT("reason"), TEXT("not dirty"));
+        ResultObj->SetStringField(TEXT("package"), PackageName);
+        return ResultObj;
+    }
+
+    const bool bSaved = UEditorAssetLibrary::SaveAsset(PackageName, /*bOnlyIfIsDirty=*/false);
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetBoolField(TEXT("success"), bSaved);
+    ResultObj->SetBoolField(TEXT("saved"), bSaved);
+    ResultObj->SetStringField(TEXT("package"), PackageName);
+    if (!bSaved)
+    {
+        ResultObj->SetStringField(TEXT("error"), TEXT("SaveAsset returned false"));
+    }
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleListBlueprints(const TSharedPtr<FJsonObject>& Params)
+{
+    FString PathFilter;
+    Params->TryGetStringField(TEXT("path"), PathFilter);
+    if (PathFilter.IsEmpty())
+    {
+        PathFilter = TEXT("/Game");
+    }
+
+    bool bRecursive = true;
+    if (Params->HasField(TEXT("recursive")))
+    {
+        bRecursive = Params->GetBoolField(TEXT("recursive"));
+    }
+
+    FString NameContains;
+    Params->TryGetStringField(TEXT("name_contains"), NameContains);
+
+    FAssetRegistryModule& AssetRegistryModule =
+        FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+
+    FARFilter Filter;
+    Filter.bRecursivePaths = bRecursive;
+    Filter.bRecursiveClasses = true;
+    Filter.ClassPaths.Add(UBlueprint::StaticClass()->GetClassPathName());
+    Filter.PackagePaths.Add(FName(*PathFilter));
+
+    TArray<FAssetData> AssetList;
+    AssetRegistryModule.Get().GetAssets(Filter, AssetList);
+
+    TArray<TSharedPtr<FJsonValue>> Results;
+    for (const FAssetData& Asset : AssetList)
+    {
+        const FString AssetName = Asset.AssetName.ToString();
+        if (!NameContains.IsEmpty() && !AssetName.Contains(NameContains))
+        {
+            continue;
+        }
+
+        TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+        Entry->SetStringField(TEXT("name"), AssetName);
+        Entry->SetStringField(TEXT("path"), Asset.GetObjectPathString());
+        Entry->SetStringField(TEXT("package"), Asset.PackageName.ToString());
+
+        FString ParentClass;
+        if (Asset.GetTagValue(FBlueprintTags::ParentClassPath, ParentClass))
+        {
+            Entry->SetStringField(TEXT("parent_class"), ParentClass);
+        }
+
+        Results.Add(MakeShared<FJsonValueObject>(Entry));
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetBoolField(TEXT("success"), true);
+    ResultObj->SetStringField(TEXT("path"), PathFilter);
+    ResultObj->SetNumberField(TEXT("count"), Results.Num());
+    ResultObj->SetArrayField(TEXT("blueprints"), Results);
+    return ResultObj;
+}
+
+// ============================================================================
+// Blueprint CDO default-value editing
+// ============================================================================
+//
+// Edits the Class Default Object on the Blueprint's GeneratedClass. For a
+// Blueprint subclass of a native UObject, this is how you override the native
+// constructor's default for UPROPERTY members (weapon assets, state tree refs,
+// etc.) without touching C++.
+//
+// After mutation, we mark the Blueprint structurally modified AND dirty the
+// the generated-class package so the change persists on save.
+
+namespace
+{
+	// Resolve to a loaded UBlueprint, accepting either a short name or a full package path.
+	UBlueprint* LoadBlueprintForDefaults(const FString& NameOrPath, FString& OutError)
+	{
+		if (NameOrPath.IsEmpty())
+		{
+			OutError = TEXT("blueprint_name is empty");
+			return nullptr;
+		}
+		if (UBlueprint* BP = FEpicUnrealMCPCommonUtils::FindBlueprint(NameOrPath))
+		{
+			return BP;
+		}
+		if (NameOrPath.StartsWith(TEXT("/")))
+		{
+			if (UObject* Loaded = UEditorAssetLibrary::LoadAsset(NameOrPath))
+			{
+				if (UBlueprint* BP = Cast<UBlueprint>(Loaded))
+				{
+					return BP;
+				}
+				OutError = FString::Printf(TEXT("Asset '%s' is not a UBlueprint"), *NameOrPath);
+				return nullptr;
+			}
+		}
+		OutError = FString::Printf(TEXT("Could not find blueprint '%s'"), *NameOrPath);
+		return nullptr;
+	}
+
+	UObject* GetBlueprintCDO(UBlueprint* Blueprint, FString& OutError)
+	{
+		if (!Blueprint) { OutError = TEXT("Blueprint is null"); return nullptr; }
+		UClass* GeneratedClass = Blueprint->GeneratedClass;
+		if (!GeneratedClass)
+		{
+			OutError = FString::Printf(TEXT("Blueprint '%s' has no GeneratedClass (needs compile?)"),
+				*Blueprint->GetName());
+			return nullptr;
+		}
+		UObject* CDO = GeneratedClass->GetDefaultObject();
+		if (!CDO)
+		{
+			OutError = FString::Printf(TEXT("Blueprint '%s' GeneratedClass has no CDO"),
+				*Blueprint->GetName());
+			return nullptr;
+		}
+		return CDO;
+	}
+}
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleGetBlueprintDefaultValue(const TSharedPtr<FJsonObject>& Params)
+{
+	if (!Params->HasField(TEXT("blueprint_name")) || !Params->HasField(TEXT("property_name")))
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+			TEXT("Missing required field(s): blueprint_name, property_name"));
+	}
+	FString Err;
+	UBlueprint* Blueprint = LoadBlueprintForDefaults(Params->GetStringField(TEXT("blueprint_name")), Err);
+	if (!Blueprint) { return FEpicUnrealMCPCommonUtils::CreateErrorResponse(Err); }
+	UObject* CDO = GetBlueprintCDO(Blueprint, Err);
+	if (!CDO) { return FEpicUnrealMCPCommonUtils::CreateErrorResponse(Err); }
+
+	const FString PropertyName = Params->GetStringField(TEXT("property_name"));
+	FProperty* Prop = CDO->GetClass()->FindPropertyByName(*PropertyName);
+	if (!Prop)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+			FString::Printf(TEXT("Property '%s' not found on class '%s'"),
+				*PropertyName, *CDO->GetClass()->GetName()));
+	}
+
+	// Export the property value to a string (matches the editor's text representation).
+	FString ValueStr;
+	Prop->ExportText_InContainer(0, ValueStr, CDO, CDO, CDO, PPF_None);
+
+	TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
+	Result->SetBoolField(TEXT("success"), true);
+	Result->SetStringField(TEXT("blueprint_path"), Blueprint->GetPathName());
+	Result->SetStringField(TEXT("property_name"), PropertyName);
+	Result->SetStringField(TEXT("property_type"), Prop->GetCPPType());
+	Result->SetStringField(TEXT("value"), ValueStr);
+	return Result;
+}
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleSetBlueprintDefaultValue(const TSharedPtr<FJsonObject>& Params)
+{
+	if (!Params->HasField(TEXT("blueprint_name")) || !Params->HasField(TEXT("property_name")))
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+			TEXT("Missing required field(s): blueprint_name, property_name"));
+	}
+	if (!Params->HasField(TEXT("value")))
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing required field: value"));
+	}
+	FString Err;
+	UBlueprint* Blueprint = LoadBlueprintForDefaults(Params->GetStringField(TEXT("blueprint_name")), Err);
+	if (!Blueprint) { return FEpicUnrealMCPCommonUtils::CreateErrorResponse(Err); }
+	UObject* CDO = GetBlueprintCDO(Blueprint, Err);
+	if (!CDO) { return FEpicUnrealMCPCommonUtils::CreateErrorResponse(Err); }
+
+	const FString PropertyName = Params->GetStringField(TEXT("property_name"));
+	FProperty* Prop = CDO->GetClass()->FindPropertyByName(*PropertyName);
+	if (!Prop)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+			FString::Printf(TEXT("Property '%s' not found on class '%s'"),
+				*PropertyName, *CDO->GetClass()->GetName()));
+	}
+
+	Blueprint->Modify();
+	CDO->Modify();
+	CDO->UObject::PreEditChange(Prop);
+
+	FString SetErr;
+	const bool bOk = FEpicUnrealMCPCommonUtils::SetObjectProperty(
+		CDO, PropertyName, Params->TryGetField(TEXT("value")), SetErr);
+
+	FPropertyChangedEvent Evt(Prop, EPropertyChangeType::ValueSet);
+	CDO->PostEditChangeProperty(Evt);
+
+	if (!bOk)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+			FString::Printf(TEXT("Failed to set '%s': %s"), *PropertyName, *SetErr));
+	}
+
+	FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+	Blueprint->GetOutermost()->MarkPackageDirty();
+	if (UClass* GenClass = Blueprint->GeneratedClass)
+	{
+		if (UPackage* GenPkg = GenClass->GetOutermost()) { GenPkg->MarkPackageDirty(); }
+	}
+
+	const bool bRecompile = !Params->HasField(TEXT("recompile")) || Params->GetBoolField(TEXT("recompile"));
+	if (bRecompile)
+	{
+		FKismetEditorUtilities::CompileBlueprint(Blueprint);
+	}
+
+	// Read back the applied value for the response.
+	FString ValueStr;
+	Prop->ExportText_InContainer(0, ValueStr, CDO, CDO, CDO, PPF_None);
+
+	TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
+	Result->SetBoolField(TEXT("success"), true);
+	Result->SetStringField(TEXT("blueprint_path"), Blueprint->GetPathName());
+	Result->SetStringField(TEXT("property_name"), PropertyName);
+	Result->SetStringField(TEXT("value"), ValueStr);
+	Result->SetBoolField(TEXT("recompiled"), bRecompile);
+	// Surface partial-failure warnings from nested struct/array dispatchers.
+	if (!SetErr.IsEmpty())
+	{
+		Result->SetStringField(TEXT("warning"), SetErr);
+	}
+	return Result;
+}
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleResetBlueprintDefaultValue(const TSharedPtr<FJsonObject>& Params)
+{
+	if (!Params->HasField(TEXT("blueprint_name")) || !Params->HasField(TEXT("property_name")))
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+			TEXT("Missing required field(s): blueprint_name, property_name"));
+	}
+	FString Err;
+	UBlueprint* Blueprint = LoadBlueprintForDefaults(Params->GetStringField(TEXT("blueprint_name")), Err);
+	if (!Blueprint) { return FEpicUnrealMCPCommonUtils::CreateErrorResponse(Err); }
+	UObject* CDO = GetBlueprintCDO(Blueprint, Err);
+	if (!CDO) { return FEpicUnrealMCPCommonUtils::CreateErrorResponse(Err); }
+
+	const FString PropertyName = Params->GetStringField(TEXT("property_name"));
+	FProperty* Prop = CDO->GetClass()->FindPropertyByName(*PropertyName);
+	if (!Prop)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+			FString::Printf(TEXT("Property '%s' not found on class '%s'"),
+				*PropertyName, *CDO->GetClass()->GetName()));
+	}
+
+	// Look up the parent class's default to copy from.
+	UClass* ParentClass = CDO->GetClass()->GetSuperClass();
+	if (!ParentClass)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("No parent class to reset from"));
+	}
+	UObject* ParentCDO = ParentClass->GetDefaultObject();
+
+	Blueprint->Modify();
+	CDO->Modify();
+	CDO->UObject::PreEditChange(Prop);
+	Prop->CopyCompleteValue_InContainer(CDO, ParentCDO);
+	FPropertyChangedEvent Evt(Prop, EPropertyChangeType::ValueSet);
+	CDO->PostEditChangeProperty(Evt);
+
+	FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+	Blueprint->GetOutermost()->MarkPackageDirty();
+
+	const bool bRecompile = !Params->HasField(TEXT("recompile")) || Params->GetBoolField(TEXT("recompile"));
+	if (bRecompile)
+	{
+		FKismetEditorUtilities::CompileBlueprint(Blueprint);
+	}
+
+	FString ValueStr;
+	Prop->ExportText_InContainer(0, ValueStr, CDO, CDO, CDO, PPF_None);
+
+	TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
+	Result->SetBoolField(TEXT("success"), true);
+	Result->SetStringField(TEXT("blueprint_path"), Blueprint->GetPathName());
+	Result->SetStringField(TEXT("property_name"), PropertyName);
+	Result->SetStringField(TEXT("value"), ValueStr);
+	Result->SetBoolField(TEXT("recompiled"), bRecompile);
+	return Result;
+}
+
+// ============================================================================
+// Component archetype default-value editing
+// ============================================================================
+//
+// Edits properties on a component template/archetype owned by a Blueprint:
+//   - Inherited C++ default subobjects (CreateDefaultSubobject in the parent
+//     class constructor): looked up via UObject::GetDefaultSubobjectByName on
+//     the BP CDO. The archetype lives at <BP_CDO>:<SubobjectName>.
+//   - SCS-added components: looked up via Blueprint->SimpleConstructionScript
+//     ->FindSCSNode(Name)->GetActualComponentTemplate(GeneratedClass).
+//
+// This mirrors the editor's "Inherited Components" details panel, which is the
+// only way to override array/struct properties on a default subobject without
+// hand-editing the .uasset.
+
+namespace
+{
+	// Resolve the component template/archetype on a Blueprint's CDO by name.
+	// Handles both inherited C++ default subobjects and SCS-added components.
+	UActorComponent* FindBlueprintComponentArchetype(UBlueprint* Blueprint, const FString& ComponentName, FString& OutError)
+	{
+		if (!Blueprint)
+		{
+			OutError = TEXT("Blueprint is null");
+			return nullptr;
+		}
+		UClass* GeneratedClass = Blueprint->GeneratedClass;
+		if (!GeneratedClass)
+		{
+			OutError = TEXT("Blueprint has no GeneratedClass (needs compile?)");
+			return nullptr;
+		}
+		UObject* CDO = GeneratedClass->GetDefaultObject();
+		if (!CDO)
+		{
+			OutError = TEXT("Blueprint GeneratedClass has no CDO");
+			return nullptr;
+		}
+
+		// 1) Inherited C++ default subobject: created in a parent's constructor.
+		if (UObject* SubObj = CDO->GetDefaultSubobjectByName(*ComponentName))
+		{
+			if (UActorComponent* Comp = Cast<UActorComponent>(SubObj))
+			{
+				return Comp;
+			}
+		}
+
+		// 2) SCS-added component on this BP or any parent BP in the chain.
+		for (UBlueprint* BP = Blueprint; BP; BP = Cast<UBlueprint>(BP->ParentClass ? BP->ParentClass->ClassGeneratedBy : nullptr))
+		{
+			if (!BP->SimpleConstructionScript) { continue; }
+			for (USCS_Node* Node : BP->SimpleConstructionScript->GetAllNodes())
+			{
+				if (!Node) { continue; }
+				const FName NodeVarName = Node->GetVariableName();
+				if (NodeVarName.IsNone()) { continue; }
+				if (NodeVarName.ToString() == ComponentName)
+				{
+					if (UActorComponent* Template = Node->GetActualComponentTemplate(Cast<UBlueprintGeneratedClass>(GeneratedClass)))
+					{
+						return Template;
+					}
+					if (UActorComponent* Template = Node->ComponentTemplate)
+					{
+						return Template;
+					}
+				}
+			}
+		}
+
+		OutError = FString::Printf(TEXT("Component '%s' not found on Blueprint '%s' (checked inherited subobjects + SCS chain)"),
+			*ComponentName, *Blueprint->GetName());
+		return nullptr;
+	}
+}
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleGetComponentDefaultValue(const TSharedPtr<FJsonObject>& Params)
+{
+	if (!Params->HasField(TEXT("blueprint_name")) || !Params->HasField(TEXT("component_name")) || !Params->HasField(TEXT("property_name")))
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+			TEXT("Missing required field(s): blueprint_name, component_name, property_name"));
+	}
+	FString Err;
+	UBlueprint* Blueprint = LoadBlueprintForDefaults(Params->GetStringField(TEXT("blueprint_name")), Err);
+	if (!Blueprint) { return FEpicUnrealMCPCommonUtils::CreateErrorResponse(Err); }
+
+	const FString ComponentName = Params->GetStringField(TEXT("component_name"));
+	UActorComponent* Archetype = FindBlueprintComponentArchetype(Blueprint, ComponentName, Err);
+	if (!Archetype) { return FEpicUnrealMCPCommonUtils::CreateErrorResponse(Err); }
+
+	const FString PropertyName = Params->GetStringField(TEXT("property_name"));
+	FProperty* Prop = Archetype->GetClass()->FindPropertyByName(*PropertyName);
+	if (!Prop)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+			FString::Printf(TEXT("Property '%s' not found on component class '%s'"),
+				*PropertyName, *Archetype->GetClass()->GetName()));
+	}
+
+	FString ValueStr;
+	Prop->ExportText_InContainer(0, ValueStr, Archetype, Archetype, Archetype, PPF_None);
+
+	TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
+	Result->SetBoolField(TEXT("success"), true);
+	Result->SetStringField(TEXT("blueprint_path"), Blueprint->GetPathName());
+	Result->SetStringField(TEXT("component_name"), ComponentName);
+	Result->SetStringField(TEXT("component_class"), Archetype->GetClass()->GetName());
+	Result->SetStringField(TEXT("property_name"), PropertyName);
+	Result->SetStringField(TEXT("property_type"), Prop->GetCPPType());
+	Result->SetStringField(TEXT("value"), ValueStr);
+	return Result;
+}
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleSetComponentDefaultValue(const TSharedPtr<FJsonObject>& Params)
+{
+	if (!Params->HasField(TEXT("blueprint_name")) || !Params->HasField(TEXT("component_name")) || !Params->HasField(TEXT("property_name")))
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+			TEXT("Missing required field(s): blueprint_name, component_name, property_name"));
+	}
+	if (!Params->HasField(TEXT("value")))
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing required field: value"));
+	}
+	FString Err;
+	UBlueprint* Blueprint = LoadBlueprintForDefaults(Params->GetStringField(TEXT("blueprint_name")), Err);
+	if (!Blueprint) { return FEpicUnrealMCPCommonUtils::CreateErrorResponse(Err); }
+
+	const FString ComponentName = Params->GetStringField(TEXT("component_name"));
+	UActorComponent* Archetype = FindBlueprintComponentArchetype(Blueprint, ComponentName, Err);
+	if (!Archetype) { return FEpicUnrealMCPCommonUtils::CreateErrorResponse(Err); }
+
+	const FString PropertyName = Params->GetStringField(TEXT("property_name"));
+	FProperty* Prop = Archetype->GetClass()->FindPropertyByName(*PropertyName);
+	if (!Prop)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+			FString::Printf(TEXT("Property '%s' not found on component class '%s'"),
+				*PropertyName, *Archetype->GetClass()->GetName()));
+	}
+
+	Blueprint->Modify();
+	Archetype->Modify();
+	Archetype->UObject::PreEditChange(Prop);
+
+	FString SetErr;
+	const bool bOk = FEpicUnrealMCPCommonUtils::SetObjectProperty(
+		Archetype, PropertyName, Params->TryGetField(TEXT("value")), SetErr);
+
+	FPropertyChangedEvent Evt(Prop, EPropertyChangeType::ValueSet);
+	Archetype->PostEditChangeProperty(Evt);
+
+	if (!bOk)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+			FString::Printf(TEXT("Failed to set '%s' on component '%s': %s"), *PropertyName, *ComponentName, *SetErr));
+	}
+
+	FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+	Blueprint->GetOutermost()->MarkPackageDirty();
+	if (UClass* GenClass = Blueprint->GeneratedClass)
+	{
+		if (UPackage* GenPkg = GenClass->GetOutermost()) { GenPkg->MarkPackageDirty(); }
+	}
+
+	const bool bRecompile = !Params->HasField(TEXT("recompile")) || Params->GetBoolField(TEXT("recompile"));
+	if (bRecompile)
+	{
+		FKismetEditorUtilities::CompileBlueprint(Blueprint);
+	}
+
+	// Re-resolve archetype after compile (CDO may have been re-instanced).
+	UActorComponent* PostArchetype = FindBlueprintComponentArchetype(Blueprint, ComponentName, Err);
+	UObject* ReadFrom = PostArchetype ? static_cast<UObject*>(PostArchetype) : static_cast<UObject*>(Archetype);
+	FProperty* ReadProp = ReadFrom->GetClass()->FindPropertyByName(*PropertyName);
+	FString ValueStr;
+	if (ReadProp)
+	{
+		ReadProp->ExportText_InContainer(0, ValueStr, ReadFrom, ReadFrom, ReadFrom, PPF_None);
+	}
+
+	TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
+	Result->SetBoolField(TEXT("success"), true);
+	Result->SetStringField(TEXT("blueprint_path"), Blueprint->GetPathName());
+	Result->SetStringField(TEXT("component_name"), ComponentName);
+	Result->SetStringField(TEXT("property_name"), PropertyName);
+	Result->SetStringField(TEXT("value"), ValueStr);
+	Result->SetBoolField(TEXT("recompiled"), bRecompile);
+	if (!SetErr.IsEmpty())
+	{
+		Result->SetStringField(TEXT("warning"), SetErr);
+	}
+	return Result;
+}
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleResetComponentDefaultValue(const TSharedPtr<FJsonObject>& Params)
+{
+	if (!Params->HasField(TEXT("blueprint_name")) || !Params->HasField(TEXT("component_name")) || !Params->HasField(TEXT("property_name")))
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+			TEXT("Missing required field(s): blueprint_name, component_name, property_name"));
+	}
+	FString Err;
+	UBlueprint* Blueprint = LoadBlueprintForDefaults(Params->GetStringField(TEXT("blueprint_name")), Err);
+	if (!Blueprint) { return FEpicUnrealMCPCommonUtils::CreateErrorResponse(Err); }
+
+	const FString ComponentName = Params->GetStringField(TEXT("component_name"));
+	UActorComponent* Archetype = FindBlueprintComponentArchetype(Blueprint, ComponentName, Err);
+	if (!Archetype) { return FEpicUnrealMCPCommonUtils::CreateErrorResponse(Err); }
+
+	const FString PropertyName = Params->GetStringField(TEXT("property_name"));
+	FProperty* Prop = Archetype->GetClass()->FindPropertyByName(*PropertyName);
+	if (!Prop)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+			FString::Printf(TEXT("Property '%s' not found on component class '%s'"),
+				*PropertyName, *Archetype->GetClass()->GetName()));
+	}
+
+	// Walk to the nearest archetype source: the component's own archetype object
+	// (UObject::GetArchetype) is the parent class's template. CopyCompleteValue
+	// from there overwrites this BP's override with the inherited default.
+	UObject* SourceArchetype = Archetype->GetArchetype();
+	if (!SourceArchetype)
+	{
+		return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("No archetype to reset from"));
+	}
+
+	Blueprint->Modify();
+	Archetype->Modify();
+	Archetype->UObject::PreEditChange(Prop);
+	Prop->CopyCompleteValue_InContainer(Archetype, SourceArchetype);
+	FPropertyChangedEvent Evt(Prop, EPropertyChangeType::ValueSet);
+	Archetype->PostEditChangeProperty(Evt);
+
+	FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+	Blueprint->GetOutermost()->MarkPackageDirty();
+
+	const bool bRecompile = !Params->HasField(TEXT("recompile")) || Params->GetBoolField(TEXT("recompile"));
+	if (bRecompile)
+	{
+		FKismetEditorUtilities::CompileBlueprint(Blueprint);
+	}
+
+	UActorComponent* PostArchetype = FindBlueprintComponentArchetype(Blueprint, ComponentName, Err);
+	UObject* ReadFrom = PostArchetype ? static_cast<UObject*>(PostArchetype) : static_cast<UObject*>(Archetype);
+	FProperty* ReadProp = ReadFrom->GetClass()->FindPropertyByName(*PropertyName);
+	FString ValueStr;
+	if (ReadProp)
+	{
+		ReadProp->ExportText_InContainer(0, ValueStr, ReadFrom, ReadFrom, ReadFrom, PPF_None);
+	}
+
+	TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
+	Result->SetBoolField(TEXT("success"), true);
+	Result->SetStringField(TEXT("blueprint_path"), Blueprint->GetPathName());
+	Result->SetStringField(TEXT("component_name"), ComponentName);
+	Result->SetStringField(TEXT("property_name"), PropertyName);
+	Result->SetStringField(TEXT("value"), ValueStr);
+	Result->SetBoolField(TEXT("recompiled"), bRecompile);
+	return Result;
 }

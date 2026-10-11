@@ -72,6 +72,10 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPEditorCommands::HandleCommand(const FStrin
     {
         return HandleGetLandscapeInfo(Params);
     }
+    else if (CommandType == TEXT("place_actors_batch"))
+    {
+        return HandlePlaceActorsBatch(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Unknown editor command: %s"), *CommandType));
 }
@@ -158,7 +162,7 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPEditorCommands::HandleSpawnActor(const TSh
 
     // Create the actor based on type
     AActor* NewActor = nullptr;
-    UWorld* World = GEditor->GetEditorWorldContext().World();
+    UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
 
     if (!World)
     {
@@ -631,5 +635,204 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPEditorCommands::HandleGetLandscapeInfo(con
     Result->SetBoolField(TEXT("success"), true);
     Result->SetNumberField(TEXT("count"), LandscapesArray.Num());
     Result->SetArrayField(TEXT("landscapes"), LandscapesArray);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPEditorCommands::HandlePlaceActorsBatch(const TSharedPtr<FJsonObject>& Params)
+{
+    const TArray<TSharedPtr<FJsonValue>>* ActorsJson = nullptr;
+    if (!Params->TryGetArrayField(TEXT("actors"), ActorsJson) || !ActorsJson)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'actors' array"));
+    }
+
+    UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+    if (!World)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to get editor world"));
+    }
+
+    const bool bStopOnError = !Params->HasField(TEXT("stop_on_error"))
+        || Params->GetBoolField(TEXT("stop_on_error"));
+    const bool bSelectSpawned = Params->HasField(TEXT("select_spawned"))
+        && Params->GetBoolField(TEXT("select_spawned"));
+
+    TArray<TSharedPtr<FJsonValue>> Spawned;
+    TArray<TSharedPtr<FJsonValue>> Failures;
+    TArray<AActor*> SpawnedActors;
+    Spawned.Reserve(ActorsJson->Num());
+    SpawnedActors.Reserve(ActorsJson->Num());
+
+    for (int32 Index = 0; Index < ActorsJson->Num(); ++Index)
+    {
+        const TSharedPtr<FJsonObject> Entry = (*ActorsJson)[Index]->AsObject();
+        if (!Entry.IsValid())
+        {
+            TSharedPtr<FJsonObject> Fail = MakeShareable(new FJsonObject);
+            Fail->SetNumberField(TEXT("index"), Index);
+            Fail->SetStringField(TEXT("error"), TEXT("Entry is not a JSON object"));
+            Failures.Add(MakeShareable(new FJsonValueObject(Fail)));
+            if (bStopOnError) break;
+            continue;
+        }
+
+        // Resolve class. Accept "actor_class" (preferred) or "type" (compat with spawn_actor).
+        FString ClassName;
+        if (!Entry->TryGetStringField(TEXT("actor_class"), ClassName))
+        {
+            Entry->TryGetStringField(TEXT("type"), ClassName);
+        }
+        if (ClassName.IsEmpty())
+        {
+            TSharedPtr<FJsonObject> Fail = MakeShareable(new FJsonObject);
+            Fail->SetNumberField(TEXT("index"), Index);
+            Fail->SetStringField(TEXT("error"), TEXT("Missing 'actor_class' (or 'type')"));
+            Failures.Add(MakeShareable(new FJsonValueObject(Fail)));
+            if (bStopOnError) break;
+            continue;
+        }
+
+        UClass* ActorClass = FEpicUnrealMCPCommonUtils::ResolveClass(ClassName);
+        // Friendly shortcut for the same set spawn_actor accepts.
+        if (!ActorClass)
+        {
+            if (ClassName.Equals(TEXT("StaticMeshActor"), ESearchCase::IgnoreCase))      ActorClass = AStaticMeshActor::StaticClass();
+            else if (ClassName.Equals(TEXT("PointLight"), ESearchCase::IgnoreCase))      ActorClass = APointLight::StaticClass();
+            else if (ClassName.Equals(TEXT("SpotLight"), ESearchCase::IgnoreCase))       ActorClass = ASpotLight::StaticClass();
+            else if (ClassName.Equals(TEXT("DirectionalLight"), ESearchCase::IgnoreCase))ActorClass = ADirectionalLight::StaticClass();
+            else if (ClassName.Equals(TEXT("CameraActor"), ESearchCase::IgnoreCase))     ActorClass = ACameraActor::StaticClass();
+        }
+        if (!ActorClass || !ActorClass->IsChildOf(AActor::StaticClass()))
+        {
+            TSharedPtr<FJsonObject> Fail = MakeShareable(new FJsonObject);
+            Fail->SetNumberField(TEXT("index"), Index);
+            Fail->SetStringField(TEXT("class"), ClassName);
+            Fail->SetStringField(TEXT("error"), TEXT("Class not found or not an AActor subclass"));
+            Failures.Add(MakeShareable(new FJsonValueObject(Fail)));
+            if (bStopOnError) break;
+            continue;
+        }
+        if (ActorClass->HasAnyClassFlags(CLASS_Abstract | CLASS_Deprecated | CLASS_NewerVersionExists))
+        {
+            TSharedPtr<FJsonObject> Fail = MakeShareable(new FJsonObject);
+            Fail->SetNumberField(TEXT("index"), Index);
+            Fail->SetStringField(TEXT("class"), ClassName);
+            Fail->SetStringField(TEXT("error"), TEXT("Class is abstract/deprecated"));
+            Failures.Add(MakeShareable(new FJsonValueObject(Fail)));
+            if (bStopOnError) break;
+            continue;
+        }
+
+        FVector Location = Entry->HasField(TEXT("location"))
+            ? FEpicUnrealMCPCommonUtils::GetVectorFromJson(Entry, TEXT("location"))
+            : FVector::ZeroVector;
+        FRotator Rotation = Entry->HasField(TEXT("rotation"))
+            ? FEpicUnrealMCPCommonUtils::GetRotatorFromJson(Entry, TEXT("rotation"))
+            : FRotator::ZeroRotator;
+        FVector Scale = Entry->HasField(TEXT("scale"))
+            ? FEpicUnrealMCPCommonUtils::GetVectorFromJson(Entry, TEXT("scale"))
+            : FVector::OneVector;
+
+        FActorSpawnParameters SpawnParams;
+        FString DesiredName;
+        if (Entry->TryGetStringField(TEXT("name"), DesiredName) && !DesiredName.IsEmpty())
+        {
+            // Don't reject on collision — just let UE auto-uniquify rather than fail the whole batch.
+            SpawnParams.NameMode = FActorSpawnParameters::ESpawnActorNameMode::Requested;
+            SpawnParams.Name = *DesiredName;
+        }
+
+        AActor* NewActor = World->SpawnActor<AActor>(ActorClass, Location, Rotation, SpawnParams);
+        if (!NewActor)
+        {
+            TSharedPtr<FJsonObject> Fail = MakeShareable(new FJsonObject);
+            Fail->SetNumberField(TEXT("index"), Index);
+            Fail->SetStringField(TEXT("class"), ClassName);
+            Fail->SetStringField(TEXT("error"), TEXT("SpawnActor returned null"));
+            Failures.Add(MakeShareable(new FJsonValueObject(Fail)));
+            if (bStopOnError) break;
+            continue;
+        }
+
+        // Apply scale (SpawnActor only takes location+rotation).
+        FTransform Xform = NewActor->GetActorTransform();
+        Xform.SetScale3D(Scale);
+        NewActor->SetActorTransform(Xform);
+
+        // Optional static mesh assignment for AStaticMeshActor entries.
+        FString MeshPath;
+        if (Entry->TryGetStringField(TEXT("static_mesh"), MeshPath) && !MeshPath.IsEmpty())
+        {
+            if (AStaticMeshActor* SMA = Cast<AStaticMeshActor>(NewActor))
+            {
+                if (UStaticMesh* Mesh = Cast<UStaticMesh>(UEditorAssetLibrary::LoadAsset(MeshPath)))
+                {
+                    SMA->GetStaticMeshComponent()->SetStaticMesh(Mesh);
+                }
+            }
+        }
+
+        // Optional per-instance UPROPERTY map.
+        TArray<FString> PropertyWarnings;
+        if (Entry->HasField(TEXT("properties")))
+        {
+            const TSharedPtr<FJsonObject> Properties = Entry->GetObjectField(TEXT("properties"));
+            if (Properties.IsValid())
+            {
+                for (const auto& Pair : Properties->Values)
+                {
+                    FProperty* TargetProp = NewActor->GetClass()->FindPropertyByName(*Pair.Key);
+                    if (TargetProp) NewActor->PreEditChange(TargetProp);
+
+                    FString PropErr;
+                    const bool bOk = FEpicUnrealMCPCommonUtils::SetObjectProperty(NewActor, FString(*Pair.Key), Pair.Value, PropErr);
+
+                    if (TargetProp)
+                    {
+                        FPropertyChangedEvent ChangeEvent(TargetProp, EPropertyChangeType::ValueSet);
+                        NewActor->PostEditChangeProperty(ChangeEvent);
+                    }
+                    if (!bOk)
+                    {
+                        PropertyWarnings.Add(FString::Printf(TEXT("%s: %s"), *Pair.Key, *PropErr));
+                    }
+                    else if (!PropErr.IsEmpty())
+                    {
+                        PropertyWarnings.Add(FString::Printf(TEXT("%s [partial]: %s"), *Pair.Key, *PropErr));
+                    }
+                }
+            }
+        }
+
+        SpawnedActors.Add(NewActor);
+
+        TSharedPtr<FJsonObject> Info = FEpicUnrealMCPCommonUtils::ActorToJsonObject(NewActor, /*bDetailed=*/false);
+        Info->SetNumberField(TEXT("index"), Index);
+        if (PropertyWarnings.Num() > 0)
+        {
+            TArray<TSharedPtr<FJsonValue>> WarnArr;
+            for (const FString& W : PropertyWarnings) WarnArr.Add(MakeShareable(new FJsonValueString(W)));
+            Info->SetArrayField(TEXT("property_warnings"), WarnArr);
+        }
+        Spawned.Add(MakeShareable(new FJsonValueObject(Info)));
+    }
+
+    if (bSelectSpawned && GEditor && SpawnedActors.Num() > 0)
+    {
+        GEditor->SelectNone(/*bNoteSelectionChange*/ false, /*bDeselectBSPSurfs*/ true, /*WarnAboutManyActors*/ false);
+        for (AActor* A : SpawnedActors)
+        {
+            if (A) GEditor->SelectActor(A, /*bSelected*/ true, /*bNotify*/ false);
+        }
+        GEditor->NoteSelectionChange();
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
+    Result->SetBoolField(TEXT("success"), Failures.Num() == 0);
+    Result->SetNumberField(TEXT("requested"), ActorsJson->Num());
+    Result->SetNumberField(TEXT("spawned"), Spawned.Num());
+    Result->SetNumberField(TEXT("failed"), Failures.Num());
+    Result->SetArrayField(TEXT("actors"), Spawned);
+    if (Failures.Num() > 0) Result->SetArrayField(TEXT("failures"), Failures);
     return Result;
 }

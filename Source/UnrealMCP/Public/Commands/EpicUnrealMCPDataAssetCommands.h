@@ -21,4 +21,13 @@ private:
 	TSharedPtr<FJsonObject> HandleListDataAssets(const TSharedPtr<FJsonObject>& Params);
 	TSharedPtr<FJsonObject> HandleCreateDataAsset(const TSharedPtr<FJsonObject>& Params);
 	TSharedPtr<FJsonObject> HandleUpdateDataAsset(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleSetDataAssetProperty(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleGetDataAssetProperty(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleDescribeDataAssetClass(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleListDataAssetClasses(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleSaveDataAsset(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleDeleteDataAsset(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleRenameDataAsset(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleDuplicateDataAsset(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleArrayRemove(const TSharedPtr<FJsonObject>& Params);
 };

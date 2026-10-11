@@ -32,6 +32,9 @@ private:
     // Set variable properties in Blueprint (F19)
     TSharedPtr<FJsonObject> HandleSetVariableProperties(const TSharedPtr<FJsonObject>& Params);
 
+    // Delete variable from Blueprint
+    TSharedPtr<FJsonObject> HandleDeleteVariable(const TSharedPtr<FJsonObject>& Params);
+
     // Add event node to Blueprint graph
     TSharedPtr<FJsonObject> HandleAddEventNode(const TSharedPtr<FJsonObject>& Params);
 
@@ -55,4 +58,14 @@ private:
 
     // Rename function in Blueprint
     TSharedPtr<FJsonObject> HandleRenameFunction(const TSharedPtr<FJsonObject>& Params);
+
+    // Export a selection of nodes (by GUID) from a Blueprint graph to T3D text.
+    // Output is exactly what the editor's copy-paste system produces, so it can
+    // be pasted directly into the editor or fed to HandleImportNodesT3D.
+    TSharedPtr<FJsonObject> HandleExportNodesT3D(const TSharedPtr<FJsonObject>& Params);
+
+    // Paste T3D node text into a Blueprint graph. Returns the GUIDs of the
+    // newly-created nodes so subsequent connect_nodes / set_node_property calls
+    // can reference them.
+    TSharedPtr<FJsonObject> HandleImportNodesT3D(const TSharedPtr<FJsonObject>& Params);
 };

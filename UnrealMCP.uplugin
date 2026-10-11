@@ -23,5 +23,17 @@
 				"EditorScriptingUtilities"
 			]
 		}
+	],
+	"Plugins": [
+		{ "Name": "EditorScriptingUtilities", "Enabled": true },
+		{ "Name": "CommonUI",                "Enabled": true },
+		{ "Name": "GameplayTagsEditor",      "Enabled": true },
+		{ "Name": "PCG",                     "Enabled": true },
+		{ "Name": "GeometryScripting",       "Enabled": true },
+		{ "Name": "AnimationWarping",    "Enabled": true },
+		{ "Name": "StateTree",           "Enabled": true },
+		{ "Name": "GameplayStateTree",   "Enabled": true },
+		{ "Name": "PropertyBindingUtils","Enabled": true },
+		{ "Name": "PythonScriptPlugin",  "Enabled": true }
 	]
 }

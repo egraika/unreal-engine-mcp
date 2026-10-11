@@ -19,4 +19,7 @@ public:
 private:
 	TSharedPtr<FJsonObject> HandleReadDataTable(const TSharedPtr<FJsonObject>& Params);
 	TSharedPtr<FJsonObject> HandleReadDataTableRow(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleWriteDataTableRow(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleWriteDataTableRows(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleDeleteDataTableRow(const TSharedPtr<FJsonObject>& Params);
 };

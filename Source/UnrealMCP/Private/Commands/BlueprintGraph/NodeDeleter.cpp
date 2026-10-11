@@ -112,11 +112,29 @@ UEdGraphNode* FNodeDeleter::FindNodeByID(UEdGraph* Graph, const FString& NodeID)
 		return nullptr;
 	}
 
+	// Distinguish int UniqueID (the form returned by read_anim_blueprint /
+	// analyze_blueprint_graph) from a NodeGuid hex string. A guid that happens
+	// to start with digits would otherwise pass Atoi and falsely match a
+	// UniqueID, so require the whole string to be numeric.
+	bool bIdIsNumeric = !NodeID.IsEmpty();
+	for (const TCHAR Ch : NodeID)
+	{
+		if (!FChar::IsDigit(Ch)) { bIdIsNumeric = false; break; }
+	}
+	const int32 NodeUniqueId = bIdIsNumeric ? FCString::Atoi(*NodeID) : 0;
+
 	for (UEdGraphNode* Node : Graph->Nodes)
 	{
 		if (!Node)
 		{
 			continue;
+		}
+
+		// Try matching by int UniqueID first — this is what read_anim_blueprint
+		// and analyze_blueprint_graph emit, so it's the most common form.
+		if (bIdIsNumeric && (int32)Node->GetUniqueID() == NodeUniqueId)
+		{
+			return Node;
 		}
 
 		// Try matching by NodeGuid
@@ -153,36 +171,50 @@ bool FNodeDeleter::RemoveNode(UEdGraph* Graph, UEdGraphNode* Node)
 
 UBlueprint* FNodeDeleter::LoadBlueprint(const FString& BlueprintName)
 {
-	// Try direct path first
-	FString BlueprintPath = BlueprintName;
-
-	// If no path prefix, assume /Game/Blueprints/
-	if (!BlueprintPath.StartsWith(TEXT("/")))
+	// Helper: load a (possibly bare) path through the editor asset library and
+	// cast to UBlueprint. Accepts both "/Game/Foo/Bar" and "/Game/Foo/Bar.Bar".
+	auto TryLoadAt = [](const FString& InPath) -> UBlueprint*
 	{
-		BlueprintPath = TEXT("/Game/Blueprints/") + BlueprintName;
-	}
-
-	// Add .Blueprint suffix if not present
-	if (!BlueprintPath.Contains(TEXT(".")))
-	{
-		BlueprintPath += TEXT(".") + FPaths::GetBaseFilename(BlueprintPath);
-	}
-
-	// Try to load the Blueprint
-	UBlueprint* BP = LoadObject<UBlueprint>(nullptr, *BlueprintPath);
-
-	// If not found, try with UEditorAssetLibrary
-	if (!BP)
-	{
-		FString AssetPath = BlueprintPath;
-		if (UEditorAssetLibrary::DoesAssetExist(AssetPath))
+		FString Path = InPath;
+		if (!Path.Contains(TEXT(".")))
 		{
-			UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
-			BP = Cast<UBlueprint>(Asset);
+			Path += TEXT(".") + FPaths::GetBaseFilename(Path);
+		}
+		if (UBlueprint* Direct = LoadObject<UBlueprint>(nullptr, *Path))
+		{
+			return Direct;
+		}
+		if (UEditorAssetLibrary::DoesAssetExist(Path))
+		{
+			return Cast<UBlueprint>(UEditorAssetLibrary::LoadAsset(Path));
+		}
+		return nullptr;
+	};
+
+	// Full path passed in directly.
+	if (BlueprintName.StartsWith(TEXT("/")))
+	{
+		return TryLoadAt(BlueprintName);
+	}
+
+	// Bare name — probe a few common roots before giving up. AnimBPs live
+	// outside /Game/Blueprints/ in this project, so an unqualified name has
+	// to fan out instead of hard-failing on the legacy path.
+	const TArray<FString> Roots = {
+		TEXT("/Game/Blueprints/"),
+		TEXT("/Game/AnimBlueprints/"),
+		TEXT("/Game/Characters/"),
+		TEXT("/Game/")
+	};
+	for (const FString& Root : Roots)
+	{
+		if (UBlueprint* Found = TryLoadAt(Root + BlueprintName))
+		{
+			return Found;
 		}
 	}
 
-	return BP;
+	return nullptr;
 }
 
 TSharedPtr<FJsonObject> FNodeDeleter::CreateSuccessResponse(const FString& DeletedNodeID)

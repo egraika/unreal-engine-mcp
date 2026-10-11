@@ -39,10 +39,21 @@ private:
 
 	// Phase 4: AnimGraph Nodes (CopyPoseFromMesh, AnimDynamics, etc.)
 	TSharedPtr<FJsonObject> HandleAddAnimNode(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleDeleteAnimNode(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleDisconnectAnimNodes(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleSetPinDefaultValue(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleSetTransitionProperty(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleSimplifyTransitionRule(const TSharedPtr<FJsonObject>& Params);
 
 	// Helpers
 	UAnimBlueprint* LoadAnimBlueprint(const FString& NameOrPath, FString& OutError);
 	UEdGraph* FindAnimGraph(UAnimBlueprint* ABP);
 	UAnimGraphNode_StateMachine* FindStateMachineByName(UAnimBlueprint* ABP, const FString& Name);
 	UAnimStateNode* FindStateByName(UAnimationStateMachineGraph* SMGraph, const FString& Name);
+
+	// Resolves which graph an anim-graph operation should target based on Params.
+	// Defaults to the top-level AnimGraph. With state_machine + state, returns
+	// the state's BoundGraph (inner pose graph). On error, OutError is set and
+	// nullptr is returned.
+	UEdGraph* ResolveAnimGraphTarget(UAnimBlueprint* ABP, const TSharedPtr<FJsonObject>& Params, FString& OutError);
 };

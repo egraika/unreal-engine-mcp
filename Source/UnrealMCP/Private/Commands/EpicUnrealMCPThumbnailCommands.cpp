@@ -288,7 +288,7 @@ void FEpicUnrealMCPThumbnailCommands::ScanDirectoryForMeshes(const FString& Dire
 
 FString FEpicUnrealMCPThumbnailCommands::ResolveMeshPath(const FString& AssetPath) const
 {
-	UObject* LoadedAsset = UEditorAssetLibrary::LoadAsset(AssetPath);
+	UObject* LoadedAsset = FEpicUnrealMCPCommonUtils::ResolveAsset(AssetPath);
 	if (!LoadedAsset)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("ThumbnailCommands: Failed to load asset: %s"), *AssetPath);
@@ -438,7 +438,7 @@ bool FEpicUnrealMCPThumbnailCommands::RenderThumbnailViaTGP(const FString& Asset
 		return false;
 	}
 
-	UObject* MeshAsset = UEditorAssetLibrary::LoadAsset(MeshPath);
+	UObject* MeshAsset = FEpicUnrealMCPCommonUtils::ResolveAsset(MeshPath);
 	if (!MeshAsset)
 	{
 		return false;
@@ -451,7 +451,7 @@ bool FEpicUnrealMCPThumbnailCommands::RenderThumbnailViaTGP(const FString& Asset
 		return false;
 	}
 
-	UWorld* World = GEditor->GetEditorWorldContext().World();
+	UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
 	if (!World)
 	{
 		return false;
@@ -591,7 +591,7 @@ bool FEpicUnrealMCPThumbnailCommands::RenderThumbnail(const FString& AssetPath, 
 		return false;
 	}
 
-	UObject* MeshAsset = UEditorAssetLibrary::LoadAsset(MeshPath);
+	UObject* MeshAsset = FEpicUnrealMCPCommonUtils::ResolveAsset(MeshPath);
 	if (!MeshAsset)
 	{
 		UE_LOG(LogTemp, Error, TEXT("ThumbnailCommands: Failed to load mesh: %s"), *MeshPath);
@@ -608,7 +608,7 @@ bool FEpicUnrealMCPThumbnailCommands::RenderThumbnail(const FString& AssetPath, 
 
 	DisablePostProcessFeatures();
 
-	UWorld* World = GEditor->GetEditorWorldContext().World();
+	UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
 	if (!World)
 	{
 		RestorePostProcessFeatures();

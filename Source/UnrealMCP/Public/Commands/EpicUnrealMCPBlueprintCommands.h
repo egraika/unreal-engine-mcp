@@ -18,8 +18,16 @@ private:
     // Specific blueprint command handlers (only used functions)
     TSharedPtr<FJsonObject> HandleCreateBlueprint(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddComponentToBlueprint(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleAddBlueprintComponent(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleReparentBlueprintComponent(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleRemoveComponentFromBlueprint(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleGetBlueprintComponents(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleListBlueprintComponents(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetPhysicsProperties(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleCompileBlueprint(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleCompileBlueprintWithDiagnostics(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSaveBlueprint(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleListBlueprints(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSpawnBlueprintActor(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetStaticMeshProperties(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetMeshMaterialColor(const TSharedPtr<FJsonObject>& Params);
@@ -41,4 +49,13 @@ private:
     TSharedPtr<FJsonObject> HandleGetMaterialInstanceParameters(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetMaterialInstanceParameters(const TSharedPtr<FJsonObject>& Params);
 
+    // Blueprint CDO default-value editing (get/set/reset)
+    TSharedPtr<FJsonObject> HandleGetBlueprintDefaultValue(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetBlueprintDefaultValue(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleResetBlueprintDefaultValue(const TSharedPtr<FJsonObject>& Params);
+
+    // Component archetype editing (inherited C++ default subobjects + SCS-added)
+    TSharedPtr<FJsonObject> HandleGetComponentDefaultValue(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetComponentDefaultValue(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleResetComponentDefaultValue(const TSharedPtr<FJsonObject>& Params);
 };

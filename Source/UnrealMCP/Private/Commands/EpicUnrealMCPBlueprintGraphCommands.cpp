@@ -9,6 +9,12 @@
 #include "Commands/BlueprintGraph/Function/FunctionManager.h"
 #include "Commands/BlueprintGraph/Function/FunctionIO.h"
 
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNode.h"
+#include "EdGraphUtilities.h"
+#include "Engine/Blueprint.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+
 FEpicUnrealMCPBlueprintGraphCommands::FEpicUnrealMCPBlueprintGraphCommands()
 {
 }
@@ -34,6 +40,10 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintGraphCommands::HandleCommand(cons
     else if (CommandType == TEXT("set_blueprint_variable_properties"))
     {
         return HandleSetVariableProperties(Params);
+    }
+    else if (CommandType == TEXT("delete_variable"))
+    {
+        return HandleDeleteVariable(Params);
     }
     else if (CommandType == TEXT("add_event_node"))
     {
@@ -67,8 +77,200 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintGraphCommands::HandleCommand(cons
     {
         return HandleRenameFunction(Params);
     }
+    else if (CommandType == TEXT("export_nodes_t3d"))
+    {
+        return HandleExportNodesT3D(Params);
+    }
+    else if (CommandType == TEXT("import_nodes_t3d"))
+    {
+        return HandleImportNodesT3D(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Unknown blueprint graph command: %s"), *CommandType));
+}
+
+namespace
+{
+    // Resolve the target graph on a Blueprint by optional function_name. Matches the existing
+    // pattern in FBlueprintNodeManager::AddNode — first event graph if no function specified.
+    UEdGraph* ResolveBlueprintGraph(UBlueprint* BP, const TSharedPtr<FJsonObject>& Params, FString& OutError)
+    {
+        if (!BP)
+        {
+            OutError = TEXT("Blueprint is null");
+            return nullptr;
+        }
+
+        FString FunctionName;
+        if (Params->TryGetStringField(TEXT("function_name"), FunctionName) && !FunctionName.IsEmpty())
+        {
+            for (UEdGraph* FuncGraph : BP->FunctionGraphs)
+            {
+                if (FuncGraph && (FuncGraph->GetFName().ToString() == FunctionName ||
+                                  FuncGraph->GetFName().ToString().Contains(FunctionName)))
+                {
+                    return FuncGraph;
+                }
+            }
+            OutError = FString::Printf(TEXT("Function graph not found: %s"), *FunctionName);
+            return nullptr;
+        }
+
+        // No function_name → event graph
+        if (BP->UbergraphPages.Num() == 0)
+        {
+            OutError = TEXT("Blueprint has no event graph");
+            return nullptr;
+        }
+        return BP->UbergraphPages[0];
+    }
+}
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintGraphCommands::HandleExportNodesT3D(const TSharedPtr<FJsonObject>& Params)
+{
+    FString BlueprintName;
+    if (!Params->TryGetStringField(TEXT("blueprint_name"), BlueprintName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'blueprint_name'"));
+    }
+
+    UBlueprint* BP = FEpicUnrealMCPCommonUtils::FindBlueprint(BlueprintName);
+    if (!BP)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintName));
+    }
+
+    FString GraphErr;
+    UEdGraph* Graph = ResolveBlueprintGraph(BP, Params, GraphErr);
+    if (!Graph)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(GraphErr);
+    }
+
+    // Build the export set. If node_ids is present, filter; otherwise export the whole graph.
+    TSet<UObject*> ExportSet;
+    TArray<TSharedPtr<FJsonValue>> ExportedIds;
+
+    const TArray<TSharedPtr<FJsonValue>>* IdsJson = nullptr;
+    if (Params->TryGetArrayField(TEXT("node_ids"), IdsJson) && IdsJson && IdsJson->Num() > 0)
+    {
+        TSet<FString> Wanted;
+        for (const TSharedPtr<FJsonValue>& V : *IdsJson)
+        {
+            const FString Id = V.IsValid() ? V->AsString() : FString();
+            if (!Id.IsEmpty()) Wanted.Add(Id);
+        }
+        for (UEdGraphNode* Node : Graph->Nodes)
+        {
+            if (!Node) continue;
+            const FString NodeId = Node->NodeGuid.ToString();
+            if (Wanted.Contains(NodeId))
+            {
+                ExportSet.Add(Node);
+                ExportedIds.Add(MakeShareable(new FJsonValueString(NodeId)));
+            }
+        }
+        if (ExportSet.Num() == 0)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                TEXT("No matching node_ids found on the resolved graph"));
+        }
+    }
+    else
+    {
+        for (UEdGraphNode* Node : Graph->Nodes)
+        {
+            if (!Node) continue;
+            ExportSet.Add(Node);
+            ExportedIds.Add(MakeShareable(new FJsonValueString(Node->NodeGuid.ToString())));
+        }
+    }
+
+    FString ExportedText;
+    FEdGraphUtilities::ExportNodesToText(ExportSet, /*out*/ ExportedText);
+
+    TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
+    Result->SetBoolField(TEXT("success"), true);
+    Result->SetStringField(TEXT("blueprint_name"), BlueprintName);
+    Result->SetStringField(TEXT("graph"), Graph->GetName());
+    Result->SetNumberField(TEXT("exported_count"), ExportSet.Num());
+    Result->SetArrayField(TEXT("exported_node_ids"), ExportedIds);
+    Result->SetStringField(TEXT("t3d"), ExportedText);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintGraphCommands::HandleImportNodesT3D(const TSharedPtr<FJsonObject>& Params)
+{
+    FString BlueprintName;
+    if (!Params->TryGetStringField(TEXT("blueprint_name"), BlueprintName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'blueprint_name'"));
+    }
+    FString T3D;
+    if (!Params->TryGetStringField(TEXT("t3d"), T3D) || T3D.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 't3d' text"));
+    }
+
+    UBlueprint* BP = FEpicUnrealMCPCommonUtils::FindBlueprint(BlueprintName);
+    if (!BP)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintName));
+    }
+
+    FString GraphErr;
+    UEdGraph* Graph = ResolveBlueprintGraph(BP, Params, GraphErr);
+    if (!Graph)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(GraphErr);
+    }
+
+    if (!FEdGraphUtilities::CanImportNodesFromText(Graph, T3D))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("T3D text cannot be imported into this graph type"));
+    }
+
+    TSet<UEdGraphNode*> PastedNodes;
+    FEdGraphUtilities::ImportNodesFromText(Graph, T3D, /*out*/ PastedNodes);
+
+    // Optional translation offset applied uniformly so callers can place pasted clusters.
+    FVector2D Offset(0.f, 0.f);
+    if (Params->HasField(TEXT("offset_x"))) Offset.X = static_cast<float>(Params->GetNumberField(TEXT("offset_x")));
+    if (Params->HasField(TEXT("offset_y"))) Offset.Y = static_cast<float>(Params->GetNumberField(TEXT("offset_y")));
+    if (!Offset.IsZero())
+    {
+        for (UEdGraphNode* Node : PastedNodes)
+        {
+            if (!Node) continue;
+            Node->NodePosX += static_cast<int32>(Offset.X);
+            Node->NodePosY += static_cast<int32>(Offset.Y);
+        }
+    }
+
+    // Re-roll GUIDs so subsequent paste operations don't collide with the source graph's IDs.
+    // FEdGraphUtilities::ImportNodesFromText already does this for the canonical clipboard path,
+    // but explicit assignment here is harmless and guarantees uniqueness across batched imports.
+    TArray<TSharedPtr<FJsonValue>> NewIds;
+    NewIds.Reserve(PastedNodes.Num());
+    for (UEdGraphNode* Node : PastedNodes)
+    {
+        if (!Node) continue;
+        Node->CreateNewGuid();
+        NewIds.Add(MakeShareable(new FJsonValueString(Node->NodeGuid.ToString())));
+    }
+
+    FBlueprintEditorUtils::MarkBlueprintAsModified(BP);
+
+    TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
+    Result->SetBoolField(TEXT("success"), true);
+    Result->SetStringField(TEXT("blueprint_name"), BlueprintName);
+    Result->SetStringField(TEXT("graph"), Graph->GetName());
+    Result->SetNumberField(TEXT("imported_count"), PastedNodes.Num());
+    Result->SetArrayField(TEXT("imported_node_ids"), NewIds);
+    return Result;
 }
 
 TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintGraphCommands::HandleAddBlueprintNode(const TSharedPtr<FJsonObject>& Params)
@@ -180,6 +382,26 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintGraphCommands::HandleSetVariableP
 
     // Use the BPVariables to set the variable properties
     return FBPVariables::SetVariableProperties(Params);
+}
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintGraphCommands::HandleDeleteVariable(const TSharedPtr<FJsonObject>& Params)
+{
+    FString BlueprintName;
+    if (!Params->TryGetStringField(TEXT("blueprint_name"), BlueprintName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'blueprint_name' parameter"));
+    }
+
+    FString VariableName;
+    if (!Params->TryGetStringField(TEXT("variable_name"), VariableName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'variable_name' parameter"));
+    }
+
+    UE_LOG(LogTemp, Display, TEXT("FEpicUnrealMCPBlueprintGraphCommands::HandleDeleteVariable: Removing variable '%s' from blueprint '%s'"),
+        *VariableName, *BlueprintName);
+
+    return FBPVariables::DeleteVariable(Params);
 }
 
 TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintGraphCommands::HandleAddEventNode(const TSharedPtr<FJsonObject>& Params)

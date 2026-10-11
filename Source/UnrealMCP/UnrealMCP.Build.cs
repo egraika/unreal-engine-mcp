@@ -46,10 +46,13 @@ public class UnrealMCP : ModuleRules
 				"BlueprintGraph",     // For K2Node classes (F15-F22)
 				"KismetCompiler",     // For Blueprint compilation (F15-F22)
 				"AnimGraph",          // For AnimGraphNode_StateMachine (AnimBP commands)
-				"GameplayTags"        // For FGameplayTag property support
+				"AnimGraphRuntime",   // For AnimNode_ApplyAdditive, AnimNode_Slot
+				"GameplayTags",       // For FGameplayTag property support
+				"AnimationWarpingRuntime", // For FAnimNode_OrientationWarping, FAnimNode_StrideWarping
+				"AnimationWarpingEditor"   // For UAnimGraphNode_OrientationWarping, UAnimGraphNode_StrideWarping
 			}
 		);
-		
+
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
@@ -65,7 +68,23 @@ public class UnrealMCP : ModuleRules
 				"Landscape",
 				"UMG",
 				"UMGEditor",
-				"PRK"
+				"CommonUI",                // For UCommonActivatableWidget*, UCommonUserWidget, UCommonButtonBase, UCommonTextBlock
+				"PRK",
+				"StateTreeModule",         // For UStateTree, UStateTreeSchema runtime types
+				"StateTreeEditorModule",   // For UStateTreeEditorData, UStateTreeState, factory, editing subsystem
+				"GameplayStateTreeModule", // For UStateTreeComponentSchema (default schema)
+				"PropertyBindingUtils",    // For FPropertyBindingPath / binding collection base
+				"PythonScriptPlugin",      // For IPythonScriptPlugin::ExecPythonCommandEx (run_python tool)
+				"AssetTools",              // For IAssetTools::FixupReferencers (fixup_redirectors tool)
+				"GameplayTagsEditor",      // For IGameplayTagsEditorModule::AddNewGameplayTagToINI
+				"PCG",                     // For UPCGGraph, UPCGNode, UPCGSettings (pcg_* commands)
+				"MaterialEditor",          // For UMaterialEditingLibrary (material_* graph editing commands)
+				"StaticMeshEditor",        // For UStaticMeshEditorSubsystem (generate_convex_collision)
+				"NavigationSystem",        // For UNavigationSystemV1 build-status (get_navmesh_build_status)
+				"SourceControl",           // For USourceControlHelpers::CheckOutOrAddFile (save_asset_checked)
+				"GeometryCore",            // For FDynamicMesh3 (delete_mesh_geometry_in_box)
+				"GeometryFramework",       // For UDynamicMesh (EditMesh/ProcessMesh)
+				"GeometryScriptingCore"    // For CopyMeshFrom/ToStaticMesh (static-mesh <-> DynamicMesh)
 			}
 		);
 		
